@@ -12,6 +12,7 @@ from main.utils.chem import *
 import math
 
 from .boltz import calculate_boltz
+from .docking import calculate_docking
 
 
 class Objdict(dict):
@@ -197,6 +198,8 @@ class Oracle:
             else:
                 print(smi, flush=True)
                 fitness = -float(calculate_boltz(self.evaluator, smi))
+                # fitness = -float(calculate_docking(self.evaluator, smi))
+                if fitness < 0.0: fitness = 0.0
                 print(fitness, flush=True)
                 #print(fitness, type(fitness))
                 if math.isnan(fitness):
@@ -247,14 +250,14 @@ class BaseOptimizer:
         if self.smi_file is not None:
             self.all_smiles = self.load_smiles_from_file(self.smi_file)
         else:
-            # data = MolGen(name = 'ZINC')
-            # print(data)
-            # self.all_smiles = data.get_data()['smiles'].tolist()
-            self.all_smiles = []
-            with open(f"data/{args.oracles[0]}.txt", "r") as file:
-                for line in file:
-                    ligand = line[:-1]
-                    self.all_smiles.append(ligand)
+            data = MolGen(name = 'ZINC')
+            print(data)
+            self.all_smiles = data.get_data()['smiles'].tolist()
+            # self.all_smiles = []
+            # with open(f"data/{args.oracles[0]}.txt", "r") as file:
+            #     for line in file:
+            #         ligand = line[:-1]
+            #         self.all_smiles.append(ligand)
 
 
         self.sa_scorer = tdc.Oracle(name = 'SA')
@@ -370,7 +373,7 @@ class BaseOptimizer:
         self._optimize(oracle, config)
         if self.args.log_results:
             self.log_result()
-        run_name = self.args.run_name + "_" + str(seed) if seed!=0 else self.args.run_name
+        run_name = self.args.run_name + "_" + str(seed)
         self.save_result(run_name)
         self.reset()
 

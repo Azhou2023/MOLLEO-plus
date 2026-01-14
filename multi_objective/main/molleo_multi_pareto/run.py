@@ -21,7 +21,7 @@ from network import create_and_train_network, obtain_model_pred
 
 MINIMUM = 1e-10
 
-def make_mating_pool(population_mol: List[Mol], population_scores, offspring_size: int):
+def make_mating_pool(population_smiles: List[Mol], population_scores, pareto_table, offspring_size: int):
     """
     Given a population of RDKit Mol and their scores, sample a list of the same size
     with replacement using the population_scores as weights
@@ -32,14 +32,20 @@ def make_mating_pool(population_mol: List[Mol], population_scores, offspring_siz
     Returns: a list of RDKit Mol (probably not unique)
     """
     # scores -> probs
-    all_tuples = list(zip(population_scores, population_mol))
+    all_tuples = list(zip(population_scores, population_smiles))
+    
     population_scores = [s + MINIMUM for s in population_scores]
     sum_scores = sum(population_scores)
     population_probs = [p / sum_scores for p in population_scores]
     mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
     
-    mating_tuples = [all_tuples[indice] for indice in mating_indices]
+    # rank selection
+    # weights = [1/(1+pareto_table[x]) for x in population_smiles]
+    # summation = sum(weights)
+    # weights = [w/summation for w in weights]
+    # mating_indices = np.random.choice(len(all_tuples), size=offspring_size, p=weights, replace=True)
     
+    mating_tuples = [all_tuples[indice] for indice in mating_indices]
     return mating_tuples
 
 def reproduce(mating_tuples, mutation_rate, mol_lm=None, net=None):
@@ -94,14 +100,20 @@ class GB_GA_Optimizer(BaseOptimizer):
             starting_population = self.all_smiles[:config["population_size"]]
         else:
             # Exploration run
-            starting_population = np.random.choice(self.all_smiles, config["population_size"])
+            starting_population = self.all_smiles[:config["population_size"]]
 
         # select initial population
         population_smiles = starting_population
+        print("Before sanitation: " + str(len(population_smiles)))
         population_smiles = self.sanitize(population_smiles)
+        print("After sanitation: " + str(len(population_smiles)))
+        self.oracle.starting_population = population_smiles.copy()
         population_scores = self.oracle(population_smiles)
 
         patience = 0
+        pareto_table = {}
+        for smiles in population_smiles:
+            pareto_table[smiles] = 0
 
         while True:
 
@@ -111,19 +123,12 @@ class GB_GA_Optimizer(BaseOptimizer):
             else:
                 old_score = 0
             # new_population
-            mating_tuples = make_mating_pool(population_smiles, population_scores, config["population_size"])
+            mating_tuples = make_mating_pool(population_smiles, population_scores, pareto_table, config["population_size"])
             
             fp_scores = []
             offspring_mol_temp = []
             if self.args.mol_lm == 'GPT-4':
-                setup = ""
-                for eva_tuple in self.oracle.max_evaluator:
-                    setup += eva_tuple[0]
-                    setup += "_"
-                for eva_tuple in self.oracle.min_evaluator:
-                    setup += eva_tuple[0]
-                    setup += "_"
-                offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], setup[:-1]) for _ in range(config["offspring_size"])]
+                offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.boltz_cache, single_parent=self.args.single_parent) for _ in range(config["offspring_size"])]
             elif self.args.mol_lm == 'BioT5':
                 top_smi = get_best_mol(population_scores, population_smiles) 
 
@@ -163,7 +168,12 @@ class GB_GA_Optimizer(BaseOptimizer):
             #Pareto optimal set
             # self.oracle.clean_buffer()
             print("Population size: " + str(len(population_smiles)))
-            population_smiles = self.oracle.select_pareto_front(population_smiles)
+            pareto_smiles = self.oracle.select_pareto_front(population_smiles)
+            pareto_table = {}
+            for idx, smiles_set in enumerate(pareto_smiles):
+                for smiles in smiles_set:
+                    pareto_table[smiles] = idx
+            population_smiles = list(np.concatenate(pareto_smiles))
             # stats
             old_scores = population_scores
             population_scores = self.oracle(population_smiles)
@@ -183,8 +193,8 @@ class GB_GA_Optimizer(BaseOptimizer):
                     patience += 1
                     if patience >= self.args.patience:
                         self.log_intermediate(finish=True)
-                        print('convergence criteria met, abort ...... ')
-                        break
+                        print('convergence criteria met')
+                        # break
                 else:
                     patience = 0
 

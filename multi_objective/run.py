@@ -32,9 +32,11 @@ def main():
     parser.add_argument('--log_results', action='store_true')
     parser.add_argument('--log_dir', default="./results")
     parser.add_argument('--run_name', required=True)
+    parser.add_argument('--starting', default="zinc")
+    parser.add_argument('--single_parent', default=False)
     args = parser.parse_args()
 
-
+    print(args)
     args.method = args.method.lower() 
 
     path_main = os.path.dirname(os.path.realpath(__file__))
@@ -63,8 +65,8 @@ def main():
         args.pickle_directory = path_main
 
 
-    print(f'Optimizing oracle function: {args.max_obj}')
-    print(f'Optimizing oracle function: {args.min_obj}')
+    print(f'Maximizing oracle function: {args.max_obj}')
+    print(f'Minimizing oracle function: {args.min_obj}')
 
     if args.max_obj == ['qed'] and args.min_obj == ['c-met', 'sa']:
         args.task_mode = '1'

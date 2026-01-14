@@ -81,8 +81,8 @@ class GB_GA_Optimizer(BaseOptimizer):
         if args.mol_lm == "GPT-4":
             self.mol_lm = GPT4(self.oracle)
         elif args.mol_lm == "custom":
-            model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_8b_sft_brd4_overfit"
-            # model_path = "meta-llama/Llama-3.1-8B-Instruct"
+            # model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_8b_sft_brd4"
+            model_path = "meta-llama/Llama-3.1-8B-Instruct"
             print("Model: " + model_path)
             self.mol_lm = Custom_LLM(model_path, self.oracle)
         elif args.mol_lm == "BioT5":
@@ -105,8 +105,10 @@ class GB_GA_Optimizer(BaseOptimizer):
             starting_population = self.all_smiles[:config["population_size"]]
         else:
             # Exploration run
-            # starting_population = np.random.choice(self.all_smiles, config["population_size"])
-            starting_population = self.all_smiles[:config["population_size"]]
+            starting_population = np.random.choice(self.all_smiles, config["population_size"])
+            # print(len(self.all_smiles))
+            # print(config["population_size"])
+            # starting_population = self.all_smiles[:config["population_size"]]
         # select initial population
         population_smiles = starting_population
         population_mol = [Chem.MolFromSmiles(s) for s in population_smiles]

@@ -6,11 +6,14 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import Draw
 from rdkit.Chem import QED
+from rdkit.Chem import AllChem
+from rdkit.Chem import DataStructs
 import tdc
 from tdc.generation import MolGen
 from main.utils.chem import *
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from .boltz import calculate_boltz
+from collections import defaultdict
 
 from rdkit.Chem import RDConfig
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
@@ -74,11 +77,24 @@ class Oracle:
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
         self.last_log = 0
         
-        self.boltz_cache = {}
+        self.boltz_cache = defaultdict(dict)
+        self.starting_population = []
 
     @property
     def budget(self):
         return self.max_oracle_calls
+    
+    def calculate_similarity(self, smiles):
+        morgan = AllChem.GetMorganGenerator(radius=2, fpSize=512)
+        mol = Chem.MolFromSmiles(smiles)
+        fingerprint = morgan.GetFingerprint(mol)
+        max_sim = 0
+        for starting_ligand in self.starting_population:
+            cmet_mol = Chem.MolFromSmiles(starting_ligand)
+            cmet_fingerprint = morgan.GetFingerprint(cmet_mol)
+            similarity = DataStructs.TanimotoSimilarity(fingerprint, cmet_fingerprint)
+            max_sim = max(max_sim, similarity)
+        return max_sim
 
     def assign_evaluator(self, args):
 
@@ -87,18 +103,26 @@ class Oracle:
         for idx in range(len(self.max_obj)):
             if self.max_obj[idx] == "qed":
                 self.max_evaluator.append(("qed", QED.qed))
+            elif self.max_obj[idx] == "c-met":
+                self.max_evaluator.append(("c-met", calculate_boltz))
+            elif self.max_obj[idx] == "brd4":
+                self.max_evaluator.append(("brd4", calculate_boltz))
             # eva = tdc.Oracle(name = self.max_obj[idx])
             # self.max_evaluator.append(eva)
         
         for idx in range(len(self.min_obj)):
             if self.min_obj[idx] == "sa":
                 self.min_evaluator.append(("sa", sascorer.calculateScore))
+            elif self.min_obj[idx] == "sim":
+                self.min_evaluator.append(("sim", self.calculate_similarity))
             elif self.min_obj[idx] == "c-met":
                 self.min_evaluator.append(("c-met", calculate_boltz))
             elif self.min_obj[idx] == "brd4":
                 self.min_evaluator.append(("brd4", calculate_boltz))
             # eva = tdc.Oracle(name = self.min_obj[idx])
             # self.min_evaluator.append(eva)
+
+    
 
     def evaluate(self, smi):
         print('\n'+smi)
@@ -111,6 +135,14 @@ class Oracle:
                 mol = Chem.MolFromSmiles(smi)
                 evaluation = eva(mol)
                 score = score + evaluation
+            elif eva_name == "c-met" or eva_name == "brd4":
+                scale = 1
+                if smi in self.boltz_cache[eva_name]:
+                    evaluation = self.boltz_cache[eva_name][smi]
+                else:
+                    evaluation = eva(eva_name, smi)
+                self.boltz_cache[eva_name][smi] = evaluation
+                score = score + scale * evaluation
             else:
                 evaluation = eva(smi)
                 score = score + evaluation
@@ -124,16 +156,24 @@ class Oracle:
                 score = score + (1 - ((evaluation - 1)/9))
             elif eva_name == "c-met" or eva_name == "brd4":
                 scale = 1
-                if smi in self.boltz_cache:
-                    evaluation = self.boltz_cache[smi]
+                if smi in self.boltz_cache[eva_name]:
+                    evaluation = self.boltz_cache[eva_name][smi]
                 else:
                     evaluation = eva(eva_name, smi)
+                self.boltz_cache[eva_name][smi] = evaluation
                 score = score + -scale * evaluation
-                self.boltz_cache[smi] = evaluation
+            elif eva_name == "sim":
+                if smi in self.starting_population:
+                    evaluation = 0.5
+                    score = score + evaluation
+                else:
+                    evaluation = eva(smi)
+                    score = score + (1 - evaluation)
             results[eva_name] = evaluation
         for name in results:
             print(f"{name}: {str(results[name])}")
         print(f"Score: " + str(score))
+        # print(self.boltz_cache)
         return score
 
     def sort_buffer(self):
@@ -152,8 +192,14 @@ class Oracle:
 
         self.sort_buffer()
         new_buffer = {}
+        main_target = ""
+        for target in list(self.boltz_cache.keys()):
+            if target in self.min_obj:
+                main_target = target
+                break
+        print("Main target: " + main_target)
         for smiles in self.mol_buffer:
-            new_buffer[smiles] = [self.boltz_cache[smiles], self.mol_buffer[smiles][1]]
+            new_buffer[smiles] = [self.boltz_cache[main_target][smiles], self.mol_buffer[smiles][1]]
         with open(output_file_path, 'w') as f:
             yaml.dump(new_buffer, f, sort_keys=False)
 
@@ -264,6 +310,27 @@ class Oracle:
                 self.save_result(self.task_label)
         return score_list
 
+
+    def crowding_distance(self, scores, front):
+        distances = [0.0] * len(front)
+        num_obj = len(scores[0])
+
+        for i in range(num_obj):
+            sorted_idx = sorted(range(len(front)), key=lambda x: scores[front[x]][i])
+            min_val = scores[front[sorted_idx[0]]][i]
+            max_val = scores[front[sorted_idx[-1]]][i]
+            distances[sorted_idx[0]] = float('inf')
+            distances[sorted_idx[-1]] = float('inf')
+            for j in range(1, len(front) - 1):
+                prev_val = scores[front[sorted_idx[j - 1]]][i]
+                next_val = scores[front[sorted_idx[j + 1]]][i]
+                if max_val - min_val == 0:
+                    d = 0.0
+                else:
+                    d = (next_val - prev_val) / (max_val - min_val)
+                distances[sorted_idx[j]] += d
+        return distances
+
     def select_pareto_front(self, smiles_lst):
         if type(smiles_lst) == list:
             score_list = []
@@ -275,6 +342,13 @@ class Oracle:
                     if eva_name == 'qed':
                         mol = Chem.MolFromSmiles(smi)
                         single_score.append(1 - eva(mol))
+                    elif eva_name == "c-met" or eva_name == "brd4":
+                        if smi in self.boltz_cache[eva_name]:
+                            boltz = self.boltz_cache[eva_name][smi]
+                        else:
+                            boltz = eva(eva_name, smi)
+                        self.boltz_cache[eva_name][smi] = boltz
+                        single_score.append(-boltz)
                     else:
                         single_score.append(1 - eva(smi))
                 for eva_tuple in self.min_evaluator:
@@ -284,12 +358,18 @@ class Oracle:
                         mol = Chem.MolFromSmiles(smi)
                         single_score.append((eva(mol) - 1)/9)
                     elif eva_name == "c-met" or eva_name == "brd4":
-                        if smi in self.boltz_cache:
-                            boltz = self.boltz_cache[smi]
+                        if smi in self.boltz_cache[eva_name]:
+                            boltz = self.boltz_cache[eva_name][smi]
                         else:
                             boltz = eva(eva_name, smi)
-                        self.boltz_cache[smi] = boltz
+                        self.boltz_cache[eva_name][smi] = boltz
                         single_score.append(boltz)
+                    elif eva_name == "sim":
+                        if smi in self.starting_population:
+                            print("SMILES is in starting population")
+                            single_score.append(0.5)
+                        else:
+                            single_score.append(eva(smi))
                 score_list.append(single_score)
                 if smi not in self.mol_buffer.keys() and len(self.mol_buffer) <= self.max_oracle_calls:
                     self.mol_buffer[smi] = [float(self.evaluate(smi)), len(self.mol_buffer)+1]
@@ -298,10 +378,35 @@ class Oracle:
                 else:
                     print("SMILES: " + smi)
             score_array = np.array(score_list)
-            nds = NonDominatedSorting().do(score_array, only_non_dominated_front=True)
-            pareto_front = np.array(smiles_lst)[nds]
-            pareto_front_smiles = list(pareto_front)
+            n = 3
+            print(f"Taking top {str(n)} fronts")
+            nds = NonDominatedSorting().do(score_array, only_non_dominated_front=False)[:n]
+            print(nds)
+            pareto_front_smiles = []
+            num_appended = 0
+            for i in range(len(nds)):
+                # top 1 front only
+                # print(i)
+                # if i > 0:
+                #     break
+                
+                if num_appended >= 120:
+                    break
+                print(len(nds[i]))
+                if len(nds[i]) + num_appended <= 120:
+                    pareto_front_smiles.append(list(np.array(smiles_lst)[nds[i]]))
+                    num_appended += len(nds[i])
+                else:
+                    pareto_front_smiles.append(list(np.array(smiles_lst)[nds[i]])[120-num_appended])
+                    
+                    # crowding distance
+                    # cd = self.crowding_distance(score_list, nds[i])
+                    # front = list(np.array(smiles_lst)[nds[i]])
+                    # sorted_front = sorted(front, key=lambda x: cd[front.index(x)], reverse=True)
+                    # pareto_front_smiles.append(sorted_front[:(120-num_appended)])
+                    num_appended += len(nds[i])
             print("Pareto front length: " + str(len(pareto_front_smiles)))
+            print("Non dominated front: " + str(list(np.array(smiles_lst)[nds[0]])))
             return pareto_front_smiles
         else:
             print('Smiles should be in the list format.')
@@ -323,11 +428,18 @@ class BaseOptimizer:
         # self.pool = joblib.Parallel(n_jobs=self.n_jobs)
         self.smi_file = args.smi_file
         self.oracle = Oracle(args=self.args)
+        self.all_smiles = []
         if self.smi_file is not None:
             self.all_smiles = self.load_smiles_from_file(self.smi_file)
-        else:
-            data = MolGen(name = 'ZINC')
-            self.all_smiles = data.get_data()['smiles'].tolist()
+        else:  
+            if args.starting == "zinc":      
+                data = MolGen(name = 'ZINC')
+                self.all_smiles = data.get_data()['smiles'].tolist()
+            else:
+                with open(f"data/{args.min_obj[0]}.txt", "r") as file:
+                    for line in file:
+                        ligand = line[:-1]
+                        self.all_smiles.append(ligand)
             
         self.sa_scorer = tdc.Oracle(name = 'SA')
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
@@ -344,6 +456,8 @@ class BaseOptimizer:
             if smiles is not None:
                 try:
                     mol = Chem.MolFromSmiles(smiles)
+                    if not mol:
+                        continue
                     smiles = Chem.MolToSmiles(mol, canonical=True)
                     if smiles is not None and smiles not in smiles_set:
                         smiles_set.add(smiles)
@@ -391,8 +505,14 @@ class BaseOptimizer:
 
         self.sort_buffer()
         new_buffer = {}
+        main_target = ""
+        for target in list(self.oracle.boltz_cache.keys()):
+            if target in self.oracle.min_obj:
+                main_target = target
+                break
+            
         for smiles in self.oracle.mol_buffer:
-            new_buffer[smiles] = [self.oracle.boltz_cache[smiles], self.oracle.mol_buffer[smiles][1]]
+            new_buffer[smiles] = [self.oracle.boltz_cache[main_target][smiles], self.oracle.mol_buffer[smiles][1]]
         with open(output_file_path, 'w') as f:
             yaml.dump(new_buffer, f, sort_keys=False)
     

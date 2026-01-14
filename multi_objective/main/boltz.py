@@ -96,7 +96,9 @@ def calculate_boltz(protein_name, ligand):
         
         venv = "/data/boltz/.venv/bin/boltz"
         boltz_command = venv + f" predict {output_file} --use_msa_server --output_format pdb --out_dir /data/boltz/results"
-        subprocess.run(boltz_command.split(), env=new_env, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        
+        if not os.path.isfile(f"/data/boltz/results/boltz_results_{name}/predictions/{name}/affinity_{name}.json"):
+            subprocess.run(boltz_command.split(), env=new_env, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         
         if not msa_exists:
             move_command = f"cp /data/boltz/results/boltz_results_{name}/msa/{name}_0.csv /data/boltz/msa/{protein_name}.csv"
@@ -110,18 +112,18 @@ def calculate_boltz(protein_name, ligand):
             affinity = (6 - float(affinity)) * -1.364
             affinity = round(affinity, 2)
             
-        if not os.path.isfile(f"/data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb"):
-            h_bonds = 0
-        else:
-            move_command = f"cp /data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb /home/andrew/boltz_pose.pdb"
-            subprocess.run(move_command.split())
-            chimerax_command = f"chimerax --offscreen --script vis_{protein_name}.cxc --exit"
-            result = subprocess.run(chimerax_command.split(), cwd="/home/andrew", capture_output=True, text=True)
-            match = re.search(r"(\d+)\s+hydrogen bonds found", result.stdout)
-            if match:
-                h_bonds = int(match.group(1))
-            else:
-                h_bonds = 0
+        # if not os.path.isfile(f"/data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb"):
+        #     h_bonds = 0
+        # else:
+        #     move_command = f"cp /data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb /home/andrew/boltz_pose.pdb"
+        #     subprocess.run(move_command.split())
+        #     chimerax_command = f"chimerax --offscreen --script vis_{protein_name}.cxc --exit"
+        #     result = subprocess.run(chimerax_command.split(), cwd="/home/andrew", capture_output=True, text=True)
+        #     match = re.search(r"(\d+)\s+hydrogen bonds found", result.stdout)
+        #     if match:
+        #         h_bonds = int(match.group(1))
+        #     else:
+        #         h_bonds = 0
             
         return affinity
     except Exception as e:
