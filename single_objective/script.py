@@ -7,11 +7,13 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem import QED
 from rdkit.Chem import DataStructs
+from rdkit.Chem import Descriptors
 from scipy.stats import ttest_ind
 import matplotlib.pyplot as plt
 from sklearn.metrics import r2_score
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from pymoo.indicators.hv import HV
+import matplotlib.pyplot as plt
 
 from rdkit.Chem import RDConfig
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
@@ -75,6 +77,7 @@ def analyze_results(run_name, limit=False, llm_only=True, eval_sim=False):
                         mol = Chem.MolFromSmiles(ligand)
                         qed = QED.qed(mol)
                         sa = sascorer.calculateScore(mol)
+                        # mw = Descriptors.MolWt(mol)
                         
                         max_sim = 0
                         if eval_sim:
@@ -109,7 +112,7 @@ def analyze_results(run_name, limit=False, llm_only=True, eval_sim=False):
         sim = []
         threshold = -11
         num_better_than_threshold = 0
-        for i in c[:30]:
+        for i in c[:10]:
             print(i)
             best_10_cluster.append(ligands[i][0])
             qed.append(ligands[i][1])
@@ -231,6 +234,25 @@ def analyze_results(run_name, limit=False, llm_only=True, eval_sim=False):
         # get_all_ligands()
         
         # output_mols.append({key: ligands[key]} for key in c[:10])
+        m_weights = [Descriptors.MolWt(Chem.MolFromSmiles(ligand)) for ligand in sorted_data]
+        print(m_weights)
+        running_avg = []
+        cumsum = 0.0
+        for i in range(len(m_weights)):
+            if i == 0:
+                running_avg.append(None)  # no values before index 0
+            else:
+                cumsum += m_weights[i - 1]
+                running_avg.append(cumsum / i)
+
+        x = list(range(len(m_weights)))
+
+        plt.figure()
+        plt.plot(x, running_avg, marker='o')
+        plt.xlabel("Index")
+        plt.ylabel("Average of values before index")
+        plt.title("Running Average (excluding current value)")
+        plt.show()
 
     print("AVG TOP TEN (CLUSTERED): " + str(np.mean(avg_top_10)))
     print("STDEV TOP 10 (CLUSTERED): " + str(np.std(avg_top_10)))
@@ -255,14 +277,14 @@ def analyze_results(run_name, limit=False, llm_only=True, eval_sim=False):
     print()
     print()
     return unique_mean
-values1 = analyze_results("GPT-4_brd4_boltz", limit=False, llm_only=True, eval_sim=False)
+values1 = analyze_results("GPT-4_c-met_boltz_tool_use_weight", limit=False, llm_only=True, eval_sim=True)
 # values2 = analyze_results("GPT-4_brd4_boltz", limit=False, llm_only=True, eval_sim=True)
 # values1 = analyze_results("GPT-4_c-met_bindingdb_docking", limit=False, llm_only=True, eval_sim=False)
 # values3 = analyze_results("GPT-4_brd4_bindingdb_docking", limit=False, llm_only=True, eval_sim=False)
 # values2 = analyze_results("GPT-4_brd4_boltz", limit=False, llm_only=True, eval_sim=False)
 # values1 = analyze_results("GPT-4_brd4_bindingdb", limit=False, llm_only=True, eval_sim=False)
-_, p = ttest_ind(values1, values2, alternative="less", equal_var=False)
-print(p)
+# _, p = ttest_ind(values1, values2, alternative="less", equal_var=False)
+# print(p)
 # create_yaml("GPT-4_c-met_zinc")
 # set_similarity()
 

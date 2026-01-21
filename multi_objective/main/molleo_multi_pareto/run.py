@@ -34,16 +34,16 @@ def make_mating_pool(population_smiles: List[Mol], population_scores, pareto_tab
     # scores -> probs
     all_tuples = list(zip(population_scores, population_smiles))
     
-    population_scores = [s + MINIMUM for s in population_scores]
-    sum_scores = sum(population_scores)
-    population_probs = [p / sum_scores for p in population_scores]
-    mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
+    # population_scores = [s + MINIMUM for s in population_scores]
+    # sum_scores = sum(population_scores)
+    # population_probs = [p / sum_scores for p in population_scores]
+    # mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
     
     # rank selection
-    # weights = [1/(1+pareto_table[x]) for x in population_smiles]
-    # summation = sum(weights)
-    # weights = [w/summation for w in weights]
-    # mating_indices = np.random.choice(len(all_tuples), size=offspring_size, p=weights, replace=True)
+    weights = [1/(1+pareto_table[x]) for x in population_smiles]
+    summation = sum(weights)
+    weights = [w/summation for w in weights]
+    mating_indices = np.random.choice(len(all_tuples), size=offspring_size, p=weights, replace=True)
     
     mating_tuples = [all_tuples[indice] for indice in mating_indices]
     return mating_tuples

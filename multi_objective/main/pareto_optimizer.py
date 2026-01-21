@@ -397,13 +397,15 @@ class Oracle:
                     pareto_front_smiles.append(list(np.array(smiles_lst)[nds[i]]))
                     num_appended += len(nds[i])
                 else:
-                    pareto_front_smiles.append(list(np.array(smiles_lst)[nds[i]])[120-num_appended])
-                    
                     # crowding distance
-                    # cd = self.crowding_distance(score_list, nds[i])
-                    # front = list(np.array(smiles_lst)[nds[i]])
-                    # sorted_front = sorted(front, key=lambda x: cd[front.index(x)], reverse=True)
-                    # pareto_front_smiles.append(sorted_front[:(120-num_appended)])
+                    try:
+                        cd = self.crowding_distance(score_list, nds[i])
+                        front = list(np.array(smiles_lst)[nds[i]])
+                        sorted_front = sorted(front, key=lambda x: cd[front.index(x)], reverse=True)
+                        pareto_front_smiles.append(sorted_front[:(120-num_appended)])
+                    except Exception as e:
+                        print(e)
+                        pareto_front_smiles.append(list(np.array(smiles_lst)[nds[i]])[:(120-num_appended)])
                     num_appended += len(nds[i])
             print("Pareto front length: " + str(len(pareto_front_smiles)))
             print("Non dominated front: " + str(list(np.array(smiles_lst)[nds[0]])))

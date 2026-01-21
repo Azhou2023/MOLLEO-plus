@@ -18,6 +18,7 @@ from main.optimizer import BaseOptimizer
 from main.molleo.mol_lm import MolCLIP
 from main.molleo.biot5 import BioT5
 from main.molleo.GPT4 import GPT4
+from main.molleo.GPToss import GPToss
 from main.molleo.custom_llm import Custom_LLM
 from .utils import get_fp_scores
 from .network import create_and_train_network, obtain_model_pred
@@ -73,13 +74,15 @@ def get_best_mol(population_scores, population_mol):
 
 class GB_GA_Optimizer(BaseOptimizer):
 
-    def __init__(self, args=None):
+    def __init__(self, args=None, seed=None):
         super().__init__(args)
         self.model_name = "molleo"
 
         self.mol_lm = None
         if args.mol_lm == "GPT-4":
             self.mol_lm = GPT4(self.oracle)
+        elif args.mol_lm == "GPToss":
+            self.mol_lm = GPToss(self.oracle)
         elif args.mol_lm == "custom":
             # model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_8b_sft_brd4"
             model_path = "meta-llama/Llama-3.1-8B-Instruct"
@@ -89,6 +92,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             self.mol_lm = BioT5()
 
         self.args = args
+        self.seed = seed
         lm_name = "baseline"
         if args.mol_lm != None:
             lm_name = args.mol_lm
@@ -128,7 +132,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             mating_tuples = make_mating_pool(population_mol, population_scores, config["population_size"])
             fp_scores = []
             offspring_mol_temp = []
-            if self.args.mol_lm == "GPT-4" or self.args.mol_lm == "custom":
+            if self.args.mol_lm == "GPT-4" or self.args.mol_lm == "GPToss" or self.args.mol_lm == "custom":
                 offspring_mol_pairs = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.evaluator) for _ in range(config["offspring_size"])]
                 # add new_population
                 offspring_mol, offspring_scores = zip(*offspring_mol_pairs)

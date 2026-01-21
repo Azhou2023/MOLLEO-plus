@@ -53,10 +53,11 @@ def top_auc(buffer, top_n, finish, freq_log, max_oracle_calls):
 
 
 class Oracle:
-    def __init__(self, args=None, mol_buffer={}):
+    def __init__(self, args=None, seed=None, mol_buffer={}):
         self.name = None
         self.evaluator = None
         self.task_label = None
+        self.seed = seed
         if args is None:
             self.max_oracle_calls = 10000
             self.freq_log = 100
@@ -222,14 +223,16 @@ class Oracle:
                     self.sort_buffer()
                     self.log_intermediate()
                     self.last_log = len(self.mol_buffer)
-                    # self.save_result(self.args.run_name)
+                    run_name = self.args.run_name + "_" + str(self.seed)
+                    self.save_result(run_name)
         else:  ### a string of SMILES
             score_list = self.score_smi(smiles_lst)
             if len(self.mol_buffer) % self.freq_log == 0 and len(self.mol_buffer) > self.last_log:
                 self.sort_buffer()
                 self.log_intermediate()
                 self.last_log = len(self.mol_buffer)
-                # self.save_result(self.args.run_name)
+                run_name = self.args.run_name + "_" + str(self.seed)
+                self.save_result(run_name)
         return score_list
 
     @property
@@ -239,14 +242,15 @@ class Oracle:
 
 class BaseOptimizer:
 
-    def __init__(self, args=None):
+    def __init__(self, args=None, seed=None):
         self.model_name = args.mol_lm
         self.args = args
+        self.seed = seed
         print(self.args.run_name, flush=True)
         self.n_jobs = args.n_jobs
         # self.pool = joblib.Parallel(n_jobs=self.n_jobs)
         self.smi_file = args.smi_file
-        self.oracle = Oracle(args=self.args)
+        self.oracle = Oracle(args=self.args, seed=self.seed)
         if self.smi_file is not None:
             self.all_smiles = self.load_smiles_from_file(self.smi_file)
         else:
@@ -363,17 +367,16 @@ class BaseOptimizer:
 
 
 
-    def optimize(self, oracle, config, seed=0, project="test"):
+    def optimize(self, oracle, config, project="test"):
 
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        random.seed(seed)
-        self.seed = seed
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        random.seed(self.seed)
         # self.oracle.task_label = self.args.mol_lm + "_" + oracle.name + "_" + str(seed)
         self._optimize(oracle, config)
         if self.args.log_results:
             self.log_result()
-        run_name = self.args.run_name + "_" + str(seed)
+        run_name = self.args.run_name + "_" + str(self.seed)
         self.save_result(run_name)
         self.reset()
 
