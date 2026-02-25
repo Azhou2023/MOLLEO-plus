@@ -13,7 +13,14 @@ import math
 
 from .boltz import calculate_boltz
 from .docking import calculate_docking
+from torch import multiprocessing as mp
+from queue import Empty
 
+from kubernetes import config, client
+
+num_gpus = torch.cuda.device_count()
+API_URL = "https://andrew-boltz-api.nrp-nautilus.io/predict_affinity"
+use_nautilus = True
 
 class Objdict(dict):
     def __getattr__(self, name):
@@ -51,6 +58,101 @@ def top_auc(buffer, top_n, finish, freq_log, max_oracle_calls):
         sum += (max_oracle_calls - len(buffer)) * top_n_now
     return sum / max_oracle_calls
 
+def get_ready_pod_count(namespace, deployment_name):
+
+    try:
+        config.load_kube_config()
+    except config.ConfigException:
+        config.load_incluster_config()
+
+    api_instance = client.AppsV1Api()
+
+    try:
+        deployment = api_instance.read_namespaced_deployment(
+            name=deployment_name,
+            namespace=namespace
+        )
+
+        ready_count = deployment.status.ready_replicas or 0
+        print(f"Deployment: {deployment_name}")
+        print(f"Total Desired: {deployment.status.replicas}")
+        print(f"Ready & Running: {ready_count}")
+        
+        return ready_count
+
+    except client.exceptions.ApiException as e:
+        if e.status == 404:
+            print(f"Error: Deployment '{deployment_name}' not found in namespace '{namespace}'.")
+        else:
+            print(f"API Error: {e}")
+        return 0
+
+def calculate_boltz_nautilus(protein_name, ligand_smiles, idx):
+    print(f"\n[Worker {str(idx)}] Sending job for {ligand_smiles}...", flush=True)
+    
+    query_params = {
+        "protein_name": protein_name,
+        "ligand": ligand_smiles
+    }
+    worker_lifetime = time.time()
+    while True:
+        try:
+            before = time.time()
+            response = requests.post(API_URL, params=query_params, headers={'Connection': 'close'})
+            after = time.time()
+            print(response)
+            if response.status_code == 200:
+                result = response.json()
+                print(f"\n[Worker {str(idx)}] Success")
+                print(result)
+                print(f"[Worker {str(idx)}]Took: {str(after-before)} seconds", flush=True)
+                time.sleep(3)
+                return result["affinity"]
+            elif response.status_code == 429 or response.status_code == 503:
+                sleep_time = random.uniform(0.5, 2.0)
+                print(f"[Worker {str(idx)}] Busy: Retrying", flush=True)
+                current_lifetime = time.time()
+                if worker_lifetime - current_lifetime > 3600:
+                    print(f"[Worker {str(idx)}] Worker has been stalled for {str(worker_lifetime-current_lifetime)} seconds. Exiting.", flush=True)
+                    return 0
+                time.sleep(sleep_time)
+            else:
+                print(f"[Worker {str(idx)}] Error {response.status_code}: {response.text}", flush=True)
+                return 0
+        except Exception as e:
+            print(f"\n[Worker {str(idx)}] Connection failed: {str(e)}", flush=True)        
+            time.sleep(3)
+            return 0
+
+
+def gpu_worker(gpu_id, task_q, result_q, evaluator, boltz_cache):
+    while True:
+        try:
+            idx, x, val = task_q.get(timeout=3)
+            if x is None:
+                result_q.put((idx, x, -100))
+                print("Buffer is full")
+            elif val is not None:
+                result_q.put((idx, x, val))
+                print("Already in buffer")
+            else:
+                y = 0
+                max_steps = 5
+                i = 0
+                while y==0 and i < max_steps:
+                    if boltz_cache and x in boltz_cache:
+                        y = -float(boltz_cache[x])
+                        break
+                    if gpu_id >= num_gpus:
+                        y = -float(calculate_boltz_nautilus(evaluator, x, gpu_id))
+                    else:
+                        y = -float(calculate_boltz(evaluator, x, gpu_id))
+                    i+=1
+                result_q.put((idx, x, y))
+                print(f"\nWorker {gpu_id} produced result: {str((x, y))}", flush=True)
+        except Empty:
+            break
+        
 
 class Oracle:
     def __init__(self, args=None, seed=None, mol_buffer={}):
@@ -71,7 +173,56 @@ class Oracle:
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
         self.last_log = 0
 
+        self.boltz_cache = None
         self.oracle_name=None
+
+    def parallel_oracle(self, inputs):
+        print(inputs)
+        print("Number of GPUs available: " + str(num_gpus))
+        assert num_gpus > 0, "No GPUs available"
+
+        ctx = mp.get_context("spawn")
+        task_q = ctx.Queue()
+        result_q = ctx.Queue()
+
+        # enqueue tasks
+        num_new = 0
+        for i, x in enumerate(inputs):
+            if len(self.mol_buffer) + num_new >= self.max_oracle_calls:
+                task_q.put((i, None, None))
+                continue
+            if x in self.mol_buffer:
+                task_q.put((i, x, self.mol_buffer[x][0]))
+            else:
+                task_q.put((i, x, None))
+                num_new += 1
+
+        # start one worker per GPU
+        procs = []
+        num_nautilus = get_ready_pod_count("spatiotemporal-decision-making", "andrew-boltz-api")
+        num_workers = num_gpus + num_nautilus if use_nautilus else num_gpus
+        print(f"{str(num_workers)} workers available ({str(num_gpus)} local, {str(num_nautilus)} on Nautilus)")
+        for gpu_id in range(num_workers):
+            p = ctx.Process(target=gpu_worker, args=(gpu_id, task_q, result_q, self.evaluator, self.boltz_cache))
+            p.start()
+            procs.append(p)
+            time.sleep(0.1)
+
+        # collect results
+        results = [None] * len(inputs)
+        buffer_length = len(self.mol_buffer)
+        num_added = 0
+        for i in range(len(inputs)):
+            idx, x, y = result_q.get()
+            results[idx] = y
+            if x not in self.mol_buffer and y!=-100: 
+                self.mol_buffer[x] = [y, buffer_length+num_added+1]
+                num_added += 1
+        for p in procs:
+            p.join()
+        print("RESULTS: " + str(results))
+        print(self.mol_buffer)
+        return results
 
 
     @property
@@ -173,7 +324,7 @@ class Oracle:
                 time.sleep(60)
                 return 0
 
-    def score_smi(self, smi):
+    def score_smi(self, smi, device):
         """
         Function to score one molecule
 
@@ -185,46 +336,33 @@ class Oracle:
         """
         if len(self.mol_buffer) > self.max_oracle_calls:
             return 0
-        if smi is None:
-            return 0
-        mol = Chem.MolFromSmiles(smi)
-        if mol is None or len(smi) == 0:
-            print("None", flush=True)
-            return 0
+        if smi in self.mol_buffer:
+            print("Already in buffer", flush=True)
+            pass
         else:
-            smi = Chem.MolToSmiles(mol, canonical=True)
-            if smi in self.mol_buffer:
-                print("Already in buffer", flush=True)
-                pass
-            else:
-                print(smi, flush=True)
-                fitness = -float(calculate_boltz(self.evaluator, smi))
-                # fitness = -float(calculate_docking(self.evaluator, smi))
-                if fitness < 0.0: fitness = 0.0
-                print(fitness, flush=True)
-                #print(fitness, type(fitness))
-                if math.isnan(fitness):
-                    fitness = 0
-
-                self.mol_buffer[smi] = [fitness, len(self.mol_buffer)+1]
-            return self.mol_buffer[smi][0]
-
+            print(smi, flush=True)
+            fitness = -float(calculate_boltz(self.evaluator, smi, device))
+            # fitness = -float(calculate_docking(self.evaluator, smi))
+            if fitness < 0.0: fitness = 0.0
+            print(fitness, flush=True)
+            #print(fitness, type(fitness))
+            if math.isnan(fitness):
+                fitness = 0
+            self.mol_buffer[smi] = [fitness, len(self.mol_buffer)+1]
+        return self.mol_buffer[smi][0]
 
     def __call__(self, smiles_lst):
         """
         Score
         """
         if type(smiles_lst) == list:
-            score_list = []
             print(len(smiles_lst), flush=True)
-            for smi in smiles_lst:
-                score_list.append(self.score_smi(smi))
-                if len(self.mol_buffer) % self.freq_log == 0 and len(self.mol_buffer) > self.last_log:
-                    self.sort_buffer()
-                    self.log_intermediate()
-                    self.last_log = len(self.mol_buffer)
-                    run_name = self.args.run_name + "_" + str(self.seed)
-                    self.save_result(run_name)
+            
+            score_list = self.parallel_oracle(smiles_lst)
+            self.sort_buffer()
+            self.log_intermediate()
+            self.last_log = len(self.mol_buffer)
+            self.save_result(self.task_label)
         else:  ### a string of SMILES
             score_list = self.score_smi(smiles_lst)
             if len(self.mol_buffer) % self.freq_log == 0 and len(self.mol_buffer) > self.last_log:
@@ -232,7 +370,7 @@ class Oracle:
                 self.log_intermediate()
                 self.last_log = len(self.mol_buffer)
                 run_name = self.args.run_name + "_" + str(self.seed)
-                self.save_result(run_name)
+                self.save_result(self.task_label)
         return score_list
 
     @property
@@ -272,24 +410,22 @@ class BaseOptimizer:
     #     with open(file_name) as f:
     #         return self.pool(delayed(canonicalize)(s.strip()) for s in f)
 
-    def sanitize(self, mol_list, score_list=None):
-        new_mol_list = []
-        new_score_list = []
+    def sanitize(self, smiles_list, score_list=None):
+        new_smiles_list = []
         smiles_set = set()
-        for idx, mol in enumerate(mol_list):
-            if mol is not None:
+        for smiles in smiles_list:
+            if smiles is not None:
                 try:
+                    mol = Chem.MolFromSmiles(smiles)
+                    if not mol:
+                        continue
                     smiles = Chem.MolToSmiles(mol, canonical=True)
                     if smiles is not None and smiles not in smiles_set:
                         smiles_set.add(smiles)
-                        new_mol_list.append(mol)
-                        if score_list: new_score_list.append(score_list[idx])
+                        new_smiles_list.append(smiles)
                 except ValueError:
                     print('bad smiles')
-        if score_list:
-            return new_mol_list, new_score_list
-        else:
-            return new_mol_list
+        return new_smiles_list
 
     def sort_buffer(self):
         self.oracle.sort_buffer()
@@ -372,11 +508,16 @@ class BaseOptimizer:
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
         random.seed(self.seed)
-        # self.oracle.task_label = self.args.mol_lm + "_" + oracle.name + "_" + str(seed)
+        run_name = self.args.run_name + "_" + str(self.seed)
+        self.oracle.task_label = run_name
+        if self.seed <= 2:
+            with open(f"/home/ubuntu/MOLLEO/init_caches/{oracle}_{str(self.seed)}.yaml", 'r') as file:
+                self.oracle.boltz_cache = yaml.safe_load(file)
+                print(self.oracle.boltz_cache)
+
         self._optimize(oracle, config)
         if self.args.log_results:
             self.log_result()
-        run_name = self.args.run_name + "_" + str(self.seed)
         self.save_result(run_name)
         self.reset()
 

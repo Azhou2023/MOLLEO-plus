@@ -323,7 +323,7 @@ class BaseOptimizer:
         torch.manual_seed(seed)
         random.seed(seed)
         self.seed = seed 
-        self.oracle.task_label = self.args.run_name + "_" + str(seed) if seed!=0 else self.args.run_name
+        self.oracle.task_label = self.args.run_name + "_" + str(seed)
         self._optimize(config)
         if self.args.log_results:
             self.log_result()

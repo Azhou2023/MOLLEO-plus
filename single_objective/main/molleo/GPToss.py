@@ -438,55 +438,28 @@ TOOLS = {
 
 
 # ------------------------------------------------------------
-# Tool schemas
+# Tool schemas (OpenAI Responses API)
 # ------------------------------------------------------------
 TOOL_SCHEMAS = [
     {
         "type": "function",
-        "name": "validate_smiles",
-        "description": "Validate a SMILES string",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "smiles": {"type": "string"}
-            },
-            "required": ["smiles"]
-        }
-    },
-    {
-        "type": "function",
-        "name": "get_attachment_points",
-        "description": "Find atoms that can accept substituents",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "smiles": {"type": "string"}
-            },
-            "required": ["smiles"]
-        }
-    },
-    {
-        "type": "function",
         "name": "add_atom",
-        "description": "Add a single atom to a target atom",
+        "description": "Attach new atom",
         "parameters": {
             "type": "object",
             "properties": {
                 "smiles": {"type": "string"},
                 "target_atom_index": {"type": "integer"},
                 "new_atom": {"type": "string"},
-                "bond_type": {
-                    "type": "string",
-                    "enum": ["SINGLE", "DOUBLE", "TRIPLE"]
-                }
+                "bond_type": {"type": "string", "enum": ["SINGLE", "DOUBLE", "TRIPLE"]},
             },
-            "required": ["smiles", "target_atom_index", "new_atom"]
-        }
+            "required": ["smiles", "target_atom_index", "new_atom"],
+        },
     },
     {
         "type": "function",
         "name": "add_functional_group",
-        "description": "Attach a functional group to a molecule",
+        "description": "Attach new functional group",
         "parameters": {
             "type": "object",
             "properties": {
@@ -495,108 +468,63 @@ TOOL_SCHEMAS = [
                 "group": {
                     "type": "string",
                     "enum": [
-                         "ethyl",
-                        "propyl",
-                        "isopropyl",
-                        "tert_butyl",
-                        "cyclopropyl",
-                        "cyclobutyl",
-                        "cyclopentyl",
-                        "cyclohexyl",
-                        "fluoro",
-                        "chloro",
-                        "bromo",
-                        "iodo",
-                        "hydroxyl",
-                        "methoxy",
-                        "ethoxy",
-                        "amine",
-                        "methylamine",
-                        "dimethylamine",
-                        "thiol",
-                        "methylthio",
-                        "aldehyde",
-                        "ketone_methyl",
-                        "carboxylic_acid",
-                        "ester_methyl",
-                        "amide",
-                        "amide_methyl",
-                        "urea",
-                        "carbamate",
-                        "hydroxymethyl",
-                        "aminoethyl",
-                        "dimethylaminoethyl",
-                        "morpholine",
-                        "piperazine",
-                        "piperidine"
-                    ]
-                }
+                        "methyl","ethyl","propyl","isopropyl","tert_butyl",
+                        "cyclopropyl","cyclobutyl","cyclopentyl","cyclohexyl",
+                        "fluoro","chloro","bromo","iodo",
+                        "hydroxyl","methoxy","ethoxy",
+                        "amine","methylamine","dimethylamine",
+                        "thiol","methylthio",
+                        "aldehyde","ketone_methyl","carboxylic_acid",
+                        "ester_methyl","amide","amide_methyl","urea","carbamate",
+                        "hydroxymethyl","aminoethyl","dimethylaminoethyl",
+                        "morpholine","piperazine","piperidine",
+                    ],
+                },
             },
-            "required": ["smiles", "target_atom_index", "group"]
-        }
+            "required": ["smiles", "target_atom_index", "group"],
+        },
     },
     {
         "type": "function",
         "name": "replace_atom",
-        "description": "Replace an atom with another element",
+        "description": "Replace atom at specified index",
         "parameters": {
             "type": "object",
             "properties": {
                 "smiles": {"type": "string"},
                 "atom_index": {"type": "integer"},
-                "new_element": {"type": "string"}
+                "new_element": {"type": "string"},
             },
-            "required": ["smiles", "atom_index", "new_element"]
-        }
+            "required": ["smiles", "atom_index", "new_element"],
+        },
     },
     {
         "type": "function",
         "name": "replace_substructure",
-        "description": "Replace a substructure using SMARTS. Fails if replacement results in fragments.",
+        "description": "Replace SMARTS-specified substructure",
         "parameters": {
             "type": "object",
             "properties": {
                 "smiles": {"type": "string"},
                 "query_smarts": {"type": "string"},
-                "replacement_smiles": {"type": "string"}
+                "replacement_smiles": {"type": "string"},
             },
-            "required": ["smiles", "query_smarts", "replacement_smiles"]
-        }
-    },
-    {
-        "type": "function",
-        "name": "calculate_properties",
-        "description": "Compute RDKit physicochemical properties. Includes molecular weight, QED, SA, etc",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "smiles": {"type": "string"}
-            },
-            "required": ["smiles"]
-        }
+            "required": ["smiles", "query_smarts", "replacement_smiles"],
+        },
     },
     {
         "type": "function",
         "name": "remove_substructure",
-        "description": "Removes atoms matching a specific SMARTS pattern. Fails if removal results in fragments.",
+        "description": "Delete SMARTS-specified substructure",
         "parameters": {
             "type": "object",
             "properties": {
-                "smiles": {
-                    "type": "string",
-                    "description": "The SMILES string of the molecule to modify."
-                },
-                "substructure_smarts": {
-                    "type": "string",
-                    "description": "The SMARTS pattern representing the substructure to remove (e.g., '[N+](=O)[O-]' for nitro group)."
-                },
+                "smiles": {"type": "string"},
+                "substructure_smarts": {"type": "string"},
             },
-            "required": [
-                "smiles",
-                "substructure_smarts"
-            ]
-        }
-}
+            "required": ["smiles", "substructure_smarts"],
+        },
+    },
 ]
 
 
@@ -625,8 +553,9 @@ def execute_tool(name: str, args: dict) -> dict:
 # ------------------------------------------------------------
 def run_agent(
     initial_smiles: str,
-    user_goal: str,
-    max_steps: int = 20
+    prompt: str,
+    max_steps: int = 10,
+    index: int = 0
 ) -> AgentState:
 
     state = AgentState(
@@ -634,80 +563,112 @@ def run_agent(
         current_smiles=initial_smiles
     )
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a molecular design agent.\n"
-                "You may ONLY modify molecules using tools.\n"
-                "Never edit SMILES directly.\n"
-                "Always call get_attachment_points() after every SMILES modification to obtain valid attachment indices.\n"
-                "When finished, respond with FINAL_ANSWER."
-            )
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Goal: {user_goal}\n"
-                f"Initial SMILES: {initial_smiles}"
-            )
-        }
-    ]
+    system_context = (
+        "You are a molecular design agent.\n"
+        "You may ONLY modify molecules using tools.\n"
+        "Only make one modification at a time."
+    )
+    user_goal = (
+        f"Goal: {prompt}\n"
+        f"Initial SMILES: {initial_smiles}"
+    )
+    
 
+    # Reset messages list for this turn
+    messages = [
+        {"role": "system", "content": system_context},
+        {"role": "user", "content": user_goal},
+        {"role": "user", "content": f"Possible attachment points: {str(get_attachment_points(initial_smiles))}"},
+        {"role": "user", "content": f"Molecule properties: {str(calculate_properties(state.current_smiles))}"}
+    ]
+    
+    modification_tools = ["add_atom", "replace_atom", "add_functional_group", "remove_substructure", "replace_substructure"]
+
+    should_break = False
     for step in range(max_steps):
+        print(f"\n[Index {str(index)}] CURRENT MESSAGES: {str(messages)}\n", flush=True)
         response = client.responses.create(
             model='gpt-oss-120b',
             input=messages,
             tools=TOOL_SCHEMAS
         )
-            
-        should_break = False
+        
         for msg in response.output:
             if msg.type == "reasoning":
-                last_reasoning_content = msg.content
-                print(f"[Reasoning]: {msg.content}") 
-                
+                print(f"[Index {str(index)}] [Reasoning]: {msg.content}") 
             elif msg.type == "function_call":
+                print(f"[Index {str(index)}] [Tool Call]: {msg}")
+                
                 messages.append(msg)
-
                 tool_name = msg.name
-                try:
-                    args = json.loads(msg.arguments)
-                except:
-                    args = {}
+                args = json.loads(msg.arguments)
 
-                if "smiles" in args and state.current_smiles:
+                if "smiles" in args:
                     args["smiles"] = state.current_smiles
 
-                print(f"[Tool Call]: {msg}")
+                result = execute_tool(tool_name, args)
                 
-                try:
-                    result = execute_tool(tool_name, args)
-                except Exception as e:
-                    result = {"error": str(e)}
-                print(f"[Tool Result]: {result}")
+                print(f"[Index {str(index)}] [Tool Result]: {result}")
+                
                 if "new_smiles" in result:
                     state.current_smiles = result["new_smiles"]
-
+                
+                state.history.append({
+                    "step": step,
+                    "tool": tool_name,
+                    "arguments": args,
+                    "result": result
+                })
+                
                 messages.append({
                     "type": "function_call_output",
                     "call_id": msg.call_id,
                     "output": json.dumps(result)
                 })
-            else:
-                messages.append(msg)
                 
+                if tool_name in modification_tools:
+                    for i, item in enumerate(messages):
+                        if isinstance(item, dict) and "content" in item and "Possible attachment points" in item["content"]:
+                            messages.pop(i)
+                            break
+
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Output FINAL_ANSWER if you have made sufficient modifications (make at most 3). Ensure that desired properties are maintained.\n"
+                            f"Current SMILES: {state.current_smiles}\n"
+                            f"Possible attachment points: {str(get_attachment_points(state.current_smiles))}"
+                        )
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": f"Molecule properties: {str(calculate_properties(state.current_smiles))}"
+                    })
+                
+            else:
                 content = msg.content[0].text
-                print(f"[Assistant]: {msg.content}")
-                if "FINAL_ANSWER" in content or "Final" in content or "final" in content:
+                print(f"[Index {str(index)}] [Message]: {content}")
+                if "FINAL_ANSWER" in content:
+                    state.final_answer = content
                     should_break = True
                     break
-        
         if should_break:
             break
-
     return state
 
+def query_LLM(messages, index):
+    response = client.responses.create(
+        model='gpt-oss-120b',
+        input=messages,
+    )
+        
+    for msg in response.output:
+        if msg.type == "reasoning":
+            print(f"[Index {str(index)}] [Reasoning]: {msg.content}") 
+        else:
+            content = msg.content[0].text
+            print(f"[Index {str(index)}] [Message]: {content}")
+            return content
 
 class GPToss:
     def __init__(self, oracle):
@@ -745,7 +706,7 @@ class GPToss:
         self.oracle = oracle
         self.current_summary = ""
 
-    def edit(self, mating_tuples, mutation_rate, target):
+    def edit(self, idx, mating_tuples, mutation_rate, target, use_tools=False):
         task = self.task
         if target == "c-met":
             protein = "c-MET"
@@ -757,42 +718,50 @@ class GPToss:
         parent = []
         parent.append(random.choice(mating_tuples))
         parent.append(random.choice(mating_tuples))
-        parent_mol = [t[1] for t in parent]
+        parent_smiles = [t[1] for t in parent]
         parent_scores = [t[0] for t in parent]
         try:
             
             #original prompt
             # task_definition = f"I have a molecule and its docking scores to {protein}. The docking score measures how well a molecule binds to {protein}. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n"
-
-            task_objective="Improve binding affinity to the protein kinase c-MET. Only make a few (at most 3) modifications, and do not let molecular weight exceed 700.\n"
-
-            # mol_tuple = ''
-            # for i in range(2):
-            #     tu = '\n[' + Chem.MolToSmiles(parent_mol[i]) + ',' + str(-parent_scores[i]) + ']'
-            #     mol_tuple = mol_tuple + tu
-            # prompt = task_definition + mol_tuple + task_objective + self.requirements
-                    
-            # print("Prompt: " + prompt, flush=True)
-            # messages = [{"role": "user", "content": prompt}]
-            # r = query_LLM(messages)
-            for i in range(10):
-                try:
-                    state = run_agent(Chem.MolToSmiles(parent_mol[0]), task_objective, max_steps=20)
-                    break
-                except Exception as e:
-                    print(e)
-                    continue
-                
-            # r = r.replace("assistant\n\n", "")
-            # print("Response: "  + r, flush=True)
-            # proposed_smiles = re.search(r'\\box\{(.*?)\}', r).group(1)
-            # proposed_smiles = proposed_smiles.replace('"', '')
-            proposed_smiles = state.current_smiles
+            if use_tools:
+                task_objective=f"Improve binding affinity to the protein {protein}. Only make a few (at most 3) modifications, and do not let molecular weight exceed 700.\n"
+                for i in range(10):
+                    try:
+                        state = run_agent(parent_smiles[0], task_objective, max_steps=20, index=idx)
+                        break
+                    except Exception as e:
+                        print(e)
+                        continue
+                proposed_smiles = state.current_smiles
+            else:
+                mol_tuple = ''
+                for i in range(2):
+                    tu = '\n[' + parent_smiles[i] + ',' + str(-parent_scores[i]) + ']'
+                    mol_tuple = mol_tuple + tu
+                task_definition = f"I have 2 molecules and their docking scores to {protein}. The docking score measures how well a molecule binds to {protein}. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n"
+                task_objective = f'Please propose a new molecule that binds better to {protein}. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n'
+                requirements = """\n\nYour output should follow the format: {<<<Explaination>>>: $EXPLANATION, <<<Molecule>>>: \\box{$Molecule}}. Here are the requirements:\n
+                    \n\n1. $EXPLANATION should be your analysis.\n2. The $Molecule should be the smiles of your proposed molecule.\n3. The molecule should be valid.
+                    """
+                prompt = task_definition + mol_tuple + task_objective + requirements
+                        
+                print(f"[Index {str(idx)}] Prompt: " + prompt, flush=True)
+                messages = [{"role": "user", "content": prompt}]
+                for i in range(10):
+                    try:
+                        r = query_LLM(messages, index=idx)
+                        break
+                    except Exception as e:
+                        print(e)
+                        continue
+                proposed_smiles = re.search(r'\\box\{(.*?)\}', r).group(1)
+                proposed_smiles = proposed_smiles.replace('"', '')
+                print(proposed_smiles)
             proposed_smiles = sanitize_smiles(proposed_smiles)
             print(f"LLM-GENERATED: {proposed_smiles}", flush=True)
             assert proposed_smiles != None
-            score = self.oracle(proposed_smiles)
-            new_child = Chem.MolFromSmiles(proposed_smiles)
+            # score = self.oracle(proposed_smiles)
             
             # messages.append({"role": "assistant", "content": r})
             # summary_prompt = "Software shows that the ligand you generated ("+proposed_smiles+") had a binding affinity of "+str(-score)+" kcal/mol.\n"
@@ -801,21 +770,19 @@ class GPToss:
             # summary = query_LLM(messages)
             # self.current_summary = summary.replace("assistant\n\n", "")
 
-            return (new_child, score)
+            return proposed_smiles
         except Exception as e:
             traceback.print_exc()
             print(f"{type(e).__name__} {e}")
             self.error_count += 1
             print("NUM LLM ERRORS: " + str(self.error_count), flush=True)
             score = 0
-            new_child = co.crossover(parent_mol[0], parent_mol[1])
+            new_child = co.crossover(Chem.MolFromSmiles(parent_smiles[0]), Chem.MolFromSmiles(parent_smiles[1]))
             if new_child is not None:
                 new_child = mu.mutate(new_child, mutation_rate)
             if new_child is not None: 
                 smiles = Chem.MolToSmiles(new_child, isomericSmiles=False, canonical=True)
                 print(f"NON-LLM GENERATED: {smiles}")
-                score = self.oracle(smiles)
-                new_child = Chem.MolFromSmiles(smiles)
                 
                 # messages.append({"role": "assistant", "content": smiles})
                 # summary_prompt = "Software shows that the ligand "+smiles+" has a binding affinity of "+str(-score)+" kcal/mol.\n"
@@ -823,7 +790,7 @@ class GPToss:
                 # messages.append({"role": "user", "content": summary_prompt})
                 # summary = query_LLM(messages)
                 # self.current_summary = summary.replace("assistant\n\n", "")
-            return (new_child, score)
+            return smiles
 
 def sanitize_smiles(smi):
     """

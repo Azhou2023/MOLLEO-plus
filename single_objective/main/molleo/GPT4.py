@@ -718,7 +718,7 @@ class GPT4:
             # r = query_LLM(messages)
             for i in range(10):
                 try:
-                    state = run_agent(Chem.MolToSmiles(parent_mol[0]), task_objective, max_steps=20)
+                    state = run_agent(parent_mol[0], task_objective, max_steps=20)
                     break
                 except Exception as e:
                     print(e)
@@ -732,8 +732,6 @@ class GPT4:
             proposed_smiles = sanitize_smiles(proposed_smiles)
             print(f"LLM-GENERATED: {proposed_smiles}", flush=True)
             assert proposed_smiles != None
-            score = self.oracle(proposed_smiles)
-            new_child = Chem.MolFromSmiles(proposed_smiles)
             
             # messages.append({"role": "assistant", "content": r})
             # summary_prompt = "Software shows that the ligand you generated ("+proposed_smiles+") had a binding affinity of "+str(-score)+" kcal/mol.\n"
@@ -742,14 +740,14 @@ class GPT4:
             # summary = query_LLM(messages)
             # self.current_summary = summary.replace("assistant\n\n", "")
 
-            return (new_child, score)
+            return proposed_smiles
         except Exception as e:
             traceback.print_exc()
             print(f"{type(e).__name__} {e}")
             self.error_count += 1
             print("NUM LLM ERRORS: " + str(self.error_count), flush=True)
             score = 0
-            new_child = co.crossover(parent_mol[0], parent_mol[1])
+            new_child = co.crossover(Chem.MolFromSmiles(parent_mol[0]), Chem.MolFromSmiles(parent_mol[1]))
             if new_child is not None:
                 new_child = mu.mutate(new_child, mutation_rate)
             if new_child is not None: 

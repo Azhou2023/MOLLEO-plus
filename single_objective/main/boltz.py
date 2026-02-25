@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import time
 import requests
 import torch
@@ -16,7 +17,7 @@ def single_quoted_representer(dumper, data):
 
 yaml.add_representer(SingleQuoted, single_quoted_representer)
     
-def calculate_boltz(protein_name, ligand):
+def calculate_boltz(protein_name, ligand, device=None):
     if protein_name == "c-met":
         protein_sequence = "HIDLSALNPELVQAVQHVVIGPSSLIVHFNEVIGRGHFGCVYHGTLLDNDGKKIHCAVKSLNRITDIGEVSQFLTEGIIMKDFSXPNVLSLLGICLRSEGSPLVVLPYMKHGDLRNFIRNETHNPTVKDLIGFGLQVAKGMKYLASKKFVXRDLAARNCMLDEKFTVKVAXFGLARDMYDKEYYSVXNKTGAKLPVKWMALESLQTQKFTTKSDVWSFGVLLWELMTRGAPPYPDVNTFDITVYLLQGRRLLQPEYCPDPLYEVMLKCWXPKAEMRPSFSELVSRISAIFSTFIG"
     elif protein_name == "brd4":
@@ -79,7 +80,10 @@ def calculate_boltz(protein_name, ligand):
         }
         
     try:
-        print(protein_name)
+        if device:
+            print(f"\n[Worker {str(device)}]"+ligand)
+        else:
+            print("\n"+ligand)
         ligand = re.sub(r'[\\/:\*\?"<>\|]', '_', ligand)
         name = f"{protein_name}_{ligand}"
         output_file = f"/data/boltz/inputs/{name}.yaml" 
@@ -87,17 +91,26 @@ def calculate_boltz(protein_name, ligand):
         with open(output_file, "w") as outfile:
             yaml.dump(data, outfile, sort_keys=False)
         
-        all_gpu_env = os.environ.copy()
-        all_gpu_env['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
-        gpu = subprocess.run("python3 /home/ubuntu/LLaMA-Factory/find_gpu.py".split(), env=all_gpu_env, capture_output=True, text=True).stdout
-        gpu = gpu.replace('\n', '')
-        print("\nBoltz running on GPU " + gpu, flush=True)
-        new_env = os.environ.copy()
-        new_env['CUDA_VISIBLE_DEVICES'] = gpu
-        
+        if device is not None:
+            new_env = os.environ.copy()
+            new_env['CUDA_VISIBLE_DEVICES'] = str(device)
+            print("Boltz running on GPU " + str(device) + "\n", flush=True)
+        else:
+            all_gpu_env = os.environ.copy()
+            all_gpu_env['CUDA_VISIBLE_DEVICES'] = "0,1,2,3,4,5,6,7"
+            gpu = subprocess.run("python3 /home/ubuntu/LLaMA-Factory/find_gpu.py".split(), env=all_gpu_env, capture_output=True, text=True).stdout
+            gpu = gpu.replace('\n', '')
+            print("\nBoltz running on GPU " + gpu + "\n", flush=True)
+            new_env = os.environ.copy()
+            new_env['CUDA_VISIBLE_DEVICES'] = gpu
+            
         venv = "/data/boltz/.venv/bin/boltz"
-        boltz_command = venv + f" predict {output_file} --use_msa_server --output_format pdb --out_dir /data/boltz/results"
+        boltz_command = venv + f" predict {output_file} --output_format pdb --out_dir /data/boltz/results"
+
+        if not msa_exists: boltz_command += " --use_msa_server"
         subprocess.run(boltz_command.split(), env=new_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # subprocess.run(boltz_command.split(), env=new_env)
+
         
         if not msa_exists:
             move_command = f"cp /data/boltz/results/boltz_results_{name}/msa/{name}_0.csv /data/boltz/msa/{protein_name}.csv"
@@ -111,24 +124,25 @@ def calculate_boltz(protein_name, ligand):
             affinity = (6 - float(affinity)) * -1.364
             affinity = round(affinity, 2)
             
-        if not os.path.isfile(f"/data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb"):
-            h_bonds = 0
-        else:
-            move_command = f"cp /data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb /home/andrew/boltz_pose.pdb"
-            subprocess.run(move_command.split())
-            chimerax_command = f"chimerax --offscreen --script vis_{protein_name}.cxc --exit"
-            result = subprocess.run(chimerax_command.split(), cwd="/home/andrew", capture_output=True, text=True)
-            match = re.search(r"(\d+)\s+hydrogen bonds found", result.stdout)
-            if match:
-                h_bonds = int(match.group(1))
-            else:
-                h_bonds = 0
+        # if not os.path.isfile(f"/data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb"):
+        #     h_bonds = 0
+        # else:
+        #     move_command = f"cp /data/boltz/results/boltz_results_{name}/predictions/{name}/{name}_model_0.pdb /home/andrew/boltz_pose.pdb"
+        #     subprocess.run(move_command.split())
+        #     chimerax_command = f"chimerax --offscreen --script vis_{protein_name}.cxc --exit"
+        #     result = subprocess.run(chimerax_command.split(), cwd="/home/andrew", capture_output=True, text=True)
+        #     match = re.search(r"(\d+)\s+hydrogen bonds found", result.stdout)
+        #     if match:
+        #         h_bonds = int(match.group(1))
+        #     else:
+        #         h_bonds = 0
             
         return affinity
     except Exception as e:
         print(e)
         return 0
-    
+    finally:
+        shutil.rmtree(f"/data/boltz/results/boltz_results_{name}")
     
 def get_docking_data(ligand, protein):
     response = requests.get(f"https://west.ucsd.edu/llm_project/?endpoint=run_docking&smiles={ligand}&target={protein}")
@@ -146,6 +160,8 @@ def get_docking_data(ligand, protein):
     
 # with open("boltz/ligands.txt", "r") as f:
 #     smiles_list = [line.strip() for line in f if line.strip()]
+
+# print(calculate_boltz("c-met", "C[C@@H](CCc1ccccc1F)C(=O)O[C@H](C)c1nccs1", device=2))
 
 # sequence = "XIDLSALNPELVQAVQHVVIGPSSLIVHFNEVIGRGHFGCVYHGTLLDNDGKKIHCAVKSLNRITDIGEVSQFLTEGIIMKDFSXPNVLSLLGICLRSEGSPLVVLPYMKHGDLRNFIRNETHNPTVKDLIGFGLQVAKGMKYLASKKFVXRDLAARNCMLDEKFTVKVAXFGLARDMYDKEYYSVXNKTGAKLPVKWMALESLQTQKFTTKSDVWSFGVLLWELMTRGAPPYPDVNTFDITVYLLQGRRLLQPEYCPDPLYEVMLKCWXPKAEMRPSFSELVSRISAIFSTFIG"
 # results = {}

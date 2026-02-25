@@ -1,0 +1,3 @@
+/home/ubuntu/MOLLEO/single_objective :: TOKENIZERS_PARALLELISM=false python run.py molleo --mol_lm GPT-oss --oracles c-met --seed 0 --use_tools True --run_name GPT-oss_c-met_boltz_tool_use_optimized > logs/GPT-oss_c-met_boltz_tool_use_optimized.txt 2>&1
+/home/ubuntu/MOLLEO/single_objective :: TOKENIZERS_PARALLELISM=false python run.py molleo --mol_lm GPT-oss --oracles c-met --seed 0 --run_name GPT-oss_c-met_boltz > logs/GPT-oss_c-met_boltz.txt 2>&1
+/home/ubuntu/MOLLEO/multi_objective :: TOKENIZERS_PARALLELISM=false python run.py molleo_multi_pareto --mol_lm GPT-oss --max_obj qed --min_obj c-met sa --starting zinc --seed 0 --run_name GPT-oss_c-met > logs/GPT-oss_c-met.txt 2>&1

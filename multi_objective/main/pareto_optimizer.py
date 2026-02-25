@@ -1,4 +1,5 @@
 import os
+import requests
 import yaml
 import random
 import torch
@@ -14,10 +15,18 @@ from main.utils.chem import *
 from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 from .boltz import calculate_boltz
 from collections import defaultdict
+from torch import multiprocessing as mp
+from queue import Empty
+from kubernetes import client, config
 
 from rdkit.Chem import RDConfig
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
 import sascorer
+
+num_gpus = torch.cuda.device_count()
+API_URL = "https://andrew-boltz-api.nrp-nautilus.io/predict_affinity"
+use_nautilus = True
+use_local = False
 
 class Objdict(dict):
     def __getattr__(self, name):
@@ -55,9 +64,143 @@ def top_auc(buffer, top_n, finish, freq_log, max_oracle_calls):
         sum += (max_oracle_calls - len(buffer)) * top_n_now
     return sum / max_oracle_calls
 
+def tuple_to_score(input_tuple, *args):
+    score = 0
+    for idx, element in enumerate(input_tuple):
+        if args[idx][0] == "c-met" or args[idx][0] == "brd4":
+            score += (-element)
+        elif args[idx][0] == "qed" or args[idx][0] == "sa":
+            score += (1 - element)
+        else:
+            raise Exception("Invalid evaluator")
+    return score
 
+def get_ready_pod_count(namespace, deployment_name):
+
+    try:
+        config.load_kube_config()
+    except config.ConfigException:
+        config.load_incluster_config()
+
+    api_instance = client.AppsV1Api()
+
+    try:
+        deployment = api_instance.read_namespaced_deployment(
+            name=deployment_name,
+            namespace=namespace
+        )
+
+        ready_count = deployment.status.ready_replicas or 0
+        print(f"Deployment: {deployment_name}")
+        print(f"Total Desired: {deployment.status.replicas}")
+        print(f"Ready & Running: {ready_count}")
+        
+        return ready_count
+
+    except client.exceptions.ApiException as e:
+        if e.status == 404:
+            print(f"Error: Deployment '{deployment_name}' not found in namespace '{namespace}'.")
+        else:
+            print(f"API Error: {e}")
+        return 0
+
+def calculate_boltz_nautilus(protein_name, ligand_smiles, idx):
+    print(f"\n[Worker {str(idx)}] Sending job for {ligand_smiles}...", flush=True)
+    
+    query_params = {
+        "protein_name": protein_name,
+        "ligand": ligand_smiles
+    }
+    worker_lifetime = time.time()
+    num_errors = 0
+    while True:
+        try:
+            before = time.time()
+            response = requests.post(API_URL, params=query_params, headers={'Connection': 'close'})
+            after = time.time()
+            print(response)
+            if response.status_code == 200:
+                result = response.json()
+                print(f"\n[Worker {str(idx)}] Success")
+                print(result)
+                print(f"[Worker {str(idx)}]Took: {str(after-before)} seconds", flush=True)
+                time.sleep(3)
+                return result["affinity"]
+            elif response.status_code == 429 or response.status_code == 503:
+                sleep_time = random.uniform(0.5, 2.0)
+                print(f"[Worker {str(idx)}] Busy: Retrying", flush=True)
+                current_lifetime = time.time()
+                if worker_lifetime - current_lifetime > 3600:
+                    print(f"[Worker {str(idx)}] Worker has been stalled for {str(worker_lifetime-current_lifetime)} seconds. Exiting.", flush=True)
+                    return 0
+                time.sleep(sleep_time)
+            else:
+                print(f"[Worker {str(idx)}] Error {response.status_code}: {response.text}", flush=True)
+                num_errors += 1
+                if num_errors >= 100:
+                    return 0
+                time.sleep(10)
+        except Exception as e:
+            print(f"\n[Worker {str(idx)}] Connection failed: {str(e)}", flush=True)        
+            time.sleep(3)
+            return 0
+
+def gpu_worker(gpu_id, task_q, result_q, max_evaluator, min_evaluator, boltz_cache):
+    while True:
+        try:
+            idx, smi, val = task_q.get(timeout=3)
+            try:
+                if smi is None:
+                    zeros_max = [0] * len(max_evaluator)
+                    zeros_min = [0] * len(min_evaluator)
+                    result_q.put((idx, smi, zeros_max + zeros_min, zeros_max + zeros_min))  
+                else:
+                    single_score = []
+                    boltz_scores = []
+                    for eva_tuple in max_evaluator:
+                        eva_name = eva_tuple[0] 
+                        eva = eva_tuple[1]
+                        if eva_name == 'qed':
+                            mol = Chem.MolFromSmiles(smi)
+                            single_score.append(1 - eva(mol))
+                        elif eva_name == "c-met" or eva_name == "brd4":
+                            if val is not None or smi in boltz_cache[eva_name]:
+                                boltz = boltz_cache[eva_name][smi]
+                            else:
+                                if gpu_id >= num_gpus or not use_local:
+                                    boltz = calculate_boltz_nautilus(eva_name, smi, gpu_id)
+                                else:
+                                    boltz = calculate_boltz(eva_name, smi, gpu_id)
+                            boltz_scores.append(boltz)
+                            single_score.append(-boltz)
+                        else:
+                            single_score.append(1 - eva(smi))
+                    for eva_tuple in min_evaluator:
+                        eva_name = eva_tuple[0]
+                        eva = eva_tuple[1]
+                        if eva_name == 'sa':
+                            mol = Chem.MolFromSmiles(smi)
+                            single_score.append((eva(mol) - 1)/9)
+                        elif eva_name == "c-met" or eva_name == "brd4":
+                            if val is not None or smi in boltz_cache[eva_name]:
+                                boltz = boltz_cache[eva_name][smi]
+                            else:
+                                if gpu_id >= num_gpus or not use_local:
+                                    boltz = calculate_boltz_nautilus(eva_name, smi, gpu_id)
+                                else:
+                                    boltz = calculate_boltz(eva_name, smi, gpu_id)
+                            boltz_scores.append(boltz)
+                            single_score.append(boltz)
+                    result_q.put((idx, smi, single_score, boltz_scores))
+                    if val is None: print(f"GPU {gpu_id} produced result: {str((smi, single_score, boltz_scores))}\n")
+            except Exception as e:
+                print(e)
+                sys.exit()
+        except Empty:
+            break
+    
 class Oracle:
-    def __init__(self, args=None, mol_buffer={}):
+    def __init__(self, args=None):
         self.name = None
         self.max_obj = args.max_obj
         self.min_obj = args.min_obj
@@ -71,7 +214,7 @@ class Oracle:
             self.args = args
             self.max_oracle_calls = args.max_oracle_calls
             self.freq_log = args.freq_log
-        self.mol_buffer = mol_buffer
+        self.mol_buffer = {}
         self.storing_buffer = {}
         self.sa_scorer = tdc.Oracle(name = 'SA')
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
@@ -83,6 +226,71 @@ class Oracle:
     @property
     def budget(self):
         return self.max_oracle_calls
+    
+    def parallel_oracle(self, inputs):
+        print(inputs)
+        print("Number of GPUs available: " + str(num_gpus))
+        assert num_gpus > 0, "No GPUs available"
+
+        ctx = mp.get_context("spawn")
+        task_q = ctx.Queue()
+        result_q = ctx.Queue()
+
+        # enqueue tasks
+        num_added = 0
+        for i, x in enumerate(inputs):
+            if len(self.mol_buffer) + num_added >= self.max_oracle_calls:
+                task_q.put((i, None, None))
+                continue
+            if x in self.mol_buffer:
+                task_q.put((i, x, self.mol_buffer[x][0]))
+            else:
+                task_q.put((i, x, None))
+                num_added += 1
+        
+        procs = []
+        num_nautilus = get_ready_pod_count("spatiotemporal-decision-making", "andrew-boltz-api")
+        num_workers = 0
+        num_workers += num_gpus if use_local else 0
+        num_workers += num_nautilus if use_nautilus else 0
+        print(f"{str(num_workers)} workers available ({str(num_gpus)} local, {str(num_nautilus)} on Nautilus)")
+        for gpu_id in range(num_workers):
+            p = ctx.Process(target=gpu_worker, args=(gpu_id, task_q, result_q, self.max_evaluator, self.min_evaluator, self.boltz_cache))
+            p.start()
+            procs.append(p)
+            time.sleep(0.1)
+
+        # collect results
+        results = [None] * len(inputs)
+        buffer_length = len(self.mol_buffer)
+        num_added = 0
+        for i in range(len(inputs)):
+            idx, x, single_score, boltz_scores = result_q.get()
+            
+            # results array
+            results[idx] = single_score
+            
+            # boltz cache
+            boltz_index = 0
+            for eva_tuple in self.max_evaluator:
+                if eva_tuple[0] == "c-met" or eva_tuple[0] == "brd4":
+                    self.boltz_cache[eva_tuple[0]][x] = boltz_scores[boltz_index]
+                    boltz_index += 1
+            for eva_tuple in self.min_evaluator:
+                if eva_tuple[0] == "c-met" or eva_tuple[0] == "brd4":
+                    self.boltz_cache[eva_tuple[0]][x] = boltz_scores[boltz_index]
+                    boltz_index += 1
+            
+            # mol buffer
+            if x not in self.mol_buffer and any(single_score): 
+                self.mol_buffer[x] = [tuple_to_score(single_score, *self.max_evaluator, *self.min_evaluator), buffer_length+num_added+1]
+                num_added += 1
+                
+        for p in procs:
+            p.join()
+        print("RESULTS: " + str(results))
+        print(self.mol_buffer)
+        return results
     
     def calculate_similarity(self, smiles):
         morgan = AllChem.GetMorganGenerator(radius=2, fpSize=512)
@@ -293,9 +501,8 @@ class Oracle:
         Score
         """
         if type(smiles_lst) == list:
-            score_list = []
-            for smi in smiles_lst:
-                score_list.append(self.score_smi(smi))
+            score_tuples = self.parallel_oracle(smiles_lst)
+            score_list = (tuple_to_score(score_tuple, *self.max_evaluator, *self.min_evaluator) for score_tuple in score_tuples)
             print("Current buffer: " + str(self.mol_buffer)) 
             self.sort_buffer()
             self.log_intermediate()
@@ -309,7 +516,6 @@ class Oracle:
                 self.last_log = len(self.mol_buffer)
                 self.save_result(self.task_label)
         return score_list
-
 
     def crowding_distance(self, scores, front):
         distances = [0.0] * len(front)
@@ -330,53 +536,11 @@ class Oracle:
                     d = (next_val - prev_val) / (max_val - min_val)
                 distances[sorted_idx[j]] += d
         return distances
+    
 
     def select_pareto_front(self, smiles_lst):
         if type(smiles_lst) == list:
-            score_list = []
-            for smi in smiles_lst:
-                single_score = []
-                for eva_tuple in self.max_evaluator:
-                    eva_name = eva_tuple[0] 
-                    eva = eva_tuple[1]
-                    if eva_name == 'qed':
-                        mol = Chem.MolFromSmiles(smi)
-                        single_score.append(1 - eva(mol))
-                    elif eva_name == "c-met" or eva_name == "brd4":
-                        if smi in self.boltz_cache[eva_name]:
-                            boltz = self.boltz_cache[eva_name][smi]
-                        else:
-                            boltz = eva(eva_name, smi)
-                        self.boltz_cache[eva_name][smi] = boltz
-                        single_score.append(-boltz)
-                    else:
-                        single_score.append(1 - eva(smi))
-                for eva_tuple in self.min_evaluator:
-                    eva_name = eva_tuple[0]
-                    eva = eva_tuple[1]
-                    if eva_name == 'sa':
-                        mol = Chem.MolFromSmiles(smi)
-                        single_score.append((eva(mol) - 1)/9)
-                    elif eva_name == "c-met" or eva_name == "brd4":
-                        if smi in self.boltz_cache[eva_name]:
-                            boltz = self.boltz_cache[eva_name][smi]
-                        else:
-                            boltz = eva(eva_name, smi)
-                        self.boltz_cache[eva_name][smi] = boltz
-                        single_score.append(boltz)
-                    elif eva_name == "sim":
-                        if smi in self.starting_population:
-                            print("SMILES is in starting population")
-                            single_score.append(0.5)
-                        else:
-                            single_score.append(eva(smi))
-                score_list.append(single_score)
-                if smi not in self.mol_buffer.keys() and len(self.mol_buffer) <= self.max_oracle_calls:
-                    self.mol_buffer[smi] = [float(self.evaluate(smi)), len(self.mol_buffer)+1]
-                    print("SMILES: " + smi)
-                    print("New buffer length: " + str(len(self.mol_buffer)))
-                else:
-                    print("SMILES: " + smi)
+            score_list = self.parallel_oracle(smiles_lst)
             score_array = np.array(score_list)
             n = 3
             print(f"Taking top {str(n)} fronts")
@@ -412,7 +576,6 @@ class Oracle:
             return pareto_front_smiles
         else:
             print('Smiles should be in the list format.')
-
 
     @property
     def finish(self):
@@ -540,7 +703,21 @@ class BaseOptimizer:
         torch.manual_seed(seed)
         random.seed(seed)
         self.seed = seed 
-        self.oracle.task_label = self.args.run_name + "_" + str(seed) if seed!=0 else self.args.run_name
+        self.oracle.task_label = self.args.run_name + "_" + str(seed)
+        
+        # initial boltz values
+        if self.seed <= 2:
+            for eva in self.args.min_obj:
+                if eva == "c-met" or eva == "brd4":
+                    with open(f"/home/ubuntu/MOLLEO/init_caches/{eva}_{str(self.seed)}.yaml", 'r') as file:
+                        self.oracle.boltz_cache[eva] = yaml.safe_load(file)
+                        print(self.oracle.boltz_cache)
+            for eva in self.args.max_obj:
+                if eva == "c-met" or eva == "brd4":
+                    with open(f"/home/ubuntu/MOLLEO/init_caches/{eva}_{str(self.seed)}.yaml", 'r') as file:
+                        self.oracle.boltz_cache[eva] = yaml.safe_load(file)
+                        print(self.oracle.boltz_cache)
+                
         self._optimize(config)
         if self.args.log_results:
             self.log_result()

@@ -9,6 +9,7 @@ from joblib import delayed
 from rdkit import Chem, rdBase
 from rdkit.Chem.rdchem import Mol
 import torch
+import yaml
 
 rdBase.DisableLog('rdApp.error')
 
@@ -23,10 +24,12 @@ from main.molleo.custom_llm import Custom_LLM
 from .utils import get_fp_scores
 from .network import create_and_train_network, obtain_model_pred
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from concurrent.futures import ThreadPoolExecutor
+
 
 MINIMUM = 1e-10
 
-def make_mating_pool(population_mol: List[Mol], population_scores, offspring_size: int):
+def make_mating_pool(population_smiles: List[Mol], population_scores, offspring_size: int):
     """
     Given a population of RDKit Mol and their scores, sample a list of the same size
     with replacement using the population_scores as weights
@@ -37,7 +40,7 @@ def make_mating_pool(population_mol: List[Mol], population_scores, offspring_siz
     Returns: a list of RDKit Mol (probably not unique)
     """
     # scores -> probs
-    all_tuples = list(zip(population_scores, population_mol))
+    all_tuples = list(zip(population_scores, population_smiles))
     population_scores = [s + MINIMUM for s in population_scores]
     print(all_tuples, flush=True)
     sum_scores = sum(population_scores)
@@ -81,7 +84,7 @@ class GB_GA_Optimizer(BaseOptimizer):
         self.mol_lm = None
         if args.mol_lm == "GPT-4":
             self.mol_lm = GPT4(self.oracle)
-        elif args.mol_lm == "GPToss":
+        elif args.mol_lm == "GPT-oss":
             self.mol_lm = GPToss(self.oracle)
         elif args.mol_lm == "custom":
             # model_path = "/home/ubuntu/LLaMA-Factory/output/llama3_8b_sft_brd4"
@@ -90,7 +93,6 @@ class GB_GA_Optimizer(BaseOptimizer):
             self.mol_lm = Custom_LLM(model_path, self.oracle)
         elif args.mol_lm == "BioT5":
             self.mol_lm = BioT5()
-
         self.args = args
         self.seed = seed
         lm_name = "baseline"
@@ -104,19 +106,30 @@ class GB_GA_Optimizer(BaseOptimizer):
 
         pool = joblib.Parallel(n_jobs=self.n_jobs)
         
-        if self.smi_file is not None:
-            # Exploitation run
-            starting_population = self.all_smiles[:config["population_size"]]
+        if self.args.checkpoint_file is not None:
+            data = yaml.safe_load(self.args.checkpoint_file)
+            population_smiles = sorted(data, key=lambda k: data[k][0], reverse=True)[:config["population_size"]]
+            print("Starting from checkpoint. Current population: " + str(population_smiles))
+            population_mol = [Chem.MolFromSmiles(s) for s in population_smiles]
+            population_scores = [data[x][0] for x in population_smiles]
+            self.oracle.mol_buffer = data
         else:
-            # Exploration run
-            starting_population = np.random.choice(self.all_smiles, config["population_size"])
-            # print(len(self.all_smiles))
-            # print(config["population_size"])
-            # starting_population = self.all_smiles[:config["population_size"]]
-        # select initial population
-        population_smiles = starting_population
-        population_mol = [Chem.MolFromSmiles(s) for s in population_smiles]
-        population_scores = self.oracle([Chem.MolToSmiles(mol, canonical=True) for mol in population_mol])
+            if self.smi_file is not None:
+                # Exploitation run
+                starting_population = self.all_smiles[:config["population_size"]]
+            else:
+                # Exploration run
+                starting_population = list(np.random.choice(self.all_smiles, config["population_size"]))
+                # print(len(self.all_smiles))
+                # print(config["population_size"])
+                # starting_population = self.all_smiles[:config["population_size"]]
+            # select initial population
+            
+            population_smiles = starting_population
+            print("Before sanitation: " + str(len(population_smiles)))
+            population_smiles = self.sanitize(population_smiles)
+            print("After sanitation: " + str(len(population_smiles)))
+            population_scores = self.oracle(population_smiles)
 
         patience = 0
 
@@ -129,19 +142,21 @@ class GB_GA_Optimizer(BaseOptimizer):
                 old_score = 0
 
             # new_population
-            mating_tuples = make_mating_pool(population_mol, population_scores, config["population_size"])
-            fp_scores = []
-            offspring_mol_temp = []
-            if self.args.mol_lm == "GPT-4" or self.args.mol_lm == "GPToss" or self.args.mol_lm == "custom":
-                offspring_mol_pairs = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.evaluator) for _ in range(config["offspring_size"])]
+            mating_tuples = make_mating_pool(population_smiles, population_scores, config["population_size"])
+
+            if self.args.mol_lm == "GPT-4" or self.args.mol_lm == "GPT-oss" or self.args.mol_lm == "custom":
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    inputs = [(idx, mating_tuples, config["mutation_rate"], self.oracle.evaluator, self.args.use_tools) for idx in range(config["offspring_size"])]
+                    offspring_smiles = list(pool.map(lambda x: self.mol_lm.edit(*x), inputs))
+                # offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.evaluator) for _ in range(config["offspring_size"])]
                 # add new_population
-                offspring_mol, offspring_scores = zip(*offspring_mol_pairs)
-                offspring_mol = list(offspring_mol)
-                offspring_scores = list(offspring_scores)
+                # offspring_mol, offspring_scores = zip(*offspring_mol_pairs)
+                # offspring_mol = list(offspring_mol)
+                # offspring_scores = list(offspring_scores)
                 
-                population_mol += offspring_mol
-                population_scores += offspring_scores
-                population_mol, population_scores = self.sanitize(population_mol, population_scores)
+                # population_mol += offspring_mol
+                # population_scores += offspring_scores
+                # population_mol, population_scores = self.sanitize(population_mol, population_scores)
             elif self.args.mol_lm == "BioT5":
                 top_smi = get_best_mol(population_scores, population_mol) 
 
@@ -180,10 +195,21 @@ class GB_GA_Optimizer(BaseOptimizer):
                 population_scores = self.oracle([Chem.MolToSmiles(mol) for mol in population_mol])
                 
             # population_scores = self.oracle([Chem.MolToSmiles(mol, canonical=True) for mol in population_mol])
-            population_tuples = list(zip(population_scores, population_mol))
+
+            print("Offspring size: " + str(len(offspring_smiles)))
+            population_smiles += offspring_smiles
+            population_smiles = self.sanitize(population_smiles)
+            print("Population size: " + str(len(population_smiles)))
+            
+            population_scores = self.oracle(population_smiles)
+            population_tuples = list(zip(population_scores, population_smiles))
             population_tuples = sorted(population_tuples, key=lambda x: x[0], reverse=True)[:config["population_size"]]
-            population_mol = [t[1] for t in population_tuples]
+            
+            population_smiles = [t[1] for t in population_tuples]
             population_scores = [t[0] for t in population_tuples]
+            
+            print("Population Molecules: " + str(population_smiles))
+            print("Population Scores: " + str(population_scores))
 
             ### early stopping
             if len(self.oracle) > 100:

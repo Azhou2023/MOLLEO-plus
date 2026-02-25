@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+from concurrent.futures import ThreadPoolExecutor
 import random
 from typing import List
 
@@ -16,6 +17,7 @@ from main.pareto_optimizer import BaseOptimizer
 #from main.graph_ga.mol_lm import MolCLIP
 from main.molleo_multi_pareto.biot5 import BioT5
 from main.molleo_multi_pareto.GPT4 import GPT4
+from main.molleo_multi_pareto.GPToss import GPToss
 from utils import get_fp_scores
 from network import create_and_train_network, obtain_model_pred
 
@@ -80,6 +82,8 @@ class GB_GA_Optimizer(BaseOptimizer):
         self.mol_lm = None
         if args.mol_lm == "GPT-4":
             self.mol_lm = GPT4()
+        elif args.mol_lm == "GPT-oss":
+            self.mol_lm = GPToss()
         elif args.mol_lm == "BioT5":
             self.mol_lm = BioT5()
         
@@ -100,7 +104,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             starting_population = self.all_smiles[:config["population_size"]]
         else:
             # Exploration run
-            starting_population = self.all_smiles[:config["population_size"]]
+            starting_population = list(np.random.choice(self.all_smiles, config["population_size"]))
 
         # select initial population
         population_smiles = starting_population
@@ -108,7 +112,9 @@ class GB_GA_Optimizer(BaseOptimizer):
         population_smiles = self.sanitize(population_smiles)
         print("After sanitation: " + str(len(population_smiles)))
         self.oracle.starting_population = population_smiles.copy()
+   
         population_scores = self.oracle(population_smiles)
+        print(population_scores)
 
         patience = 0
         pareto_table = {}
@@ -127,8 +133,12 @@ class GB_GA_Optimizer(BaseOptimizer):
             
             fp_scores = []
             offspring_mol_temp = []
-            if self.args.mol_lm == 'GPT-4':
-                offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.boltz_cache, single_parent=self.args.single_parent) for _ in range(config["offspring_size"])]
+            if self.args.mol_lm == 'GPT-4' or self.args.mol_lm == "GPT-oss":
+                with ThreadPoolExecutor(max_workers=20) as pool:
+                    inputs = [(idx, mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.boltz_cache, self.args.single_parent, self.args.use_tools) for idx in range(config["offspring_size"])]
+                    offspring_smiles = list(pool.map(lambda x: self.mol_lm.edit(*x), inputs))
+                    
+                # offspring_smiles = [self.mol_lm.edit(mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.boltz_cache, single_parent=self.args.single_parent) for _ in range(config["offspring_size"])]
             elif self.args.mol_lm == 'BioT5':
                 top_smi = get_best_mol(population_scores, population_smiles) 
 
@@ -202,7 +212,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             
             print("Length of buffer: " + str(len(self.oracle.mol_buffer)))
             print("Max oracle calls: " + str(self.oracle.max_oracle_calls))
-            if len(self.oracle.mol_buffer) > self.oracle.max_oracle_calls:
+            if len(self.oracle.mol_buffer) >= self.oracle.max_oracle_calls:
                 print("Finished")
                 break
 

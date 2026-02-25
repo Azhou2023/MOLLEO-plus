@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--pickle_directory', help='Directory containing pickle files with the distribution statistics', default=None)
     parser.add_argument('--n_jobs', type=int, default=-1)
     parser.add_argument('--output_dir', type=str, default='./results')
-    parser.add_argument('--mol_lm', type=str, default=None, choices=[None, "BioT5", "MoleculeSTM", "GPT-4", "custom"])
+    parser.add_argument('--mol_lm', type=str, default=None, choices=[None, "BioT5", "MoleculeSTM", "GPT-4", "GPT-oss", "custom"])
     parser.add_argument('--bin_size', type=int, default=100)
     parser.add_argument('--patience', type=int, default=5)
     parser.add_argument('--max_oracle_calls', type=int, default=1000)
@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--run_name', required=True)
     parser.add_argument('--starting', default="zinc")
     parser.add_argument('--single_parent', default=False)
+    parser.add_argument('--use_tools', default=False)
     args = parser.parse_args()
 
     print(args)
