@@ -33,13 +33,14 @@ def main():
     parser.add_argument('--log_dir', default="./results")
     parser.add_argument('--run_name', required=True)
     parser.add_argument('--starting', default="zinc")
-    parser.add_argument('--single_parent', default=False)
-    parser.add_argument('--use_tools', default=False)
+    parser.add_argument('--single_parent', action='store_true')
+    parser.add_argument('--use_tools', action='store_true')
+    parser.add_argument('--weighted_obj', action='store_true')
     args = parser.parse_args()
 
     print(args)
-    args.method = args.method.lower() 
-
+    args.method = args.method.lower()
+    
     path_main = os.path.dirname(os.path.realpath(__file__))
     path_main = os.path.join(path_main, "main", args.method)
 
@@ -82,10 +83,15 @@ def main():
         config_default = yaml.safe_load(open(args.config_default))
     except:
         config_default = yaml.safe_load(open(os.path.join(path_main, args.config_default)))
+        
+    directory_path = os.path.join(args.output_dir, args.run_name)
+    os.makedirs(directory_path, exist_ok=True)
+    args.output_dir = directory_path
 
     optimizer = Optimizer(args=args)
     print(config_default)
-                
+
+
     for seed in args.seed:
         print('seed', seed)
         optimizer.optimize(config=config_default, seed=seed)

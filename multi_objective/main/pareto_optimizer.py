@@ -65,15 +65,24 @@ def top_auc(buffer, top_n, finish, freq_log, max_oracle_calls):
     return sum / max_oracle_calls
 
 def tuple_to_score(input_tuple, *args):
-    score = 0
     for idx, element in enumerate(input_tuple):
         if args[idx][0] == "c-met" or args[idx][0] == "brd4":
-            score += (-element)
-        elif args[idx][0] == "qed" or args[idx][0] == "sa":
-            score += (1 - element)
+            affin = -(element/13)
+        elif args[idx][0] == "qed":
+            qed = (1 - element)
+        elif args[idx][0] == "sa":
+            sa = (1 - element)
         else:
             raise Exception("Invalid evaluator")
-    return score
+        
+    bias = {"qed": 1, "sa": 1, "affin": 5}
+    weights = {"qed": 1, "sa": 1, "affin": 1}
+
+    qed = qed * bias["qed"] * weights["qed"]
+    sa = sa * bias["sa"] * weights["sa"]
+    affin = affin * bias["affin"] * weights["affin"]
+    
+    return affin + qed + sa
 
 def get_ready_pod_count(namespace, deployment_name):
 
@@ -394,9 +403,9 @@ class Oracle:
     def save_result(self, suffix=None):
         
         if suffix is None:
-            output_file_path = os.path.join(self.args.output_dir, 'results.yaml')
+            output_file_path = os.path.join(self.args.output_dir, 'results')
         else:
-            output_file_path = os.path.join(self.args.output_dir, 'results_' + suffix + '.yaml')
+            output_file_path = os.path.join(self.args.output_dir, 'seed_' + suffix + ".yaml")
 
         self.sort_buffer()
         new_buffer = {}
@@ -407,7 +416,10 @@ class Oracle:
                 break
         print("Main target: " + main_target)
         for smiles in self.mol_buffer:
-            new_buffer[smiles] = [self.boltz_cache[main_target][smiles], self.mol_buffer[smiles][1]]
+            mol = Chem.MolFromSmiles(smiles)
+            qed = QED.qed(mol)
+            sa = sascorer.calculateScore(mol)
+            new_buffer[smiles] = [self.boltz_cache[main_target][smiles], self.mol_buffer[smiles][1], qed, sa]
         with open(output_file_path, 'w') as f:
             yaml.dump(new_buffer, f, sort_keys=False)
 
@@ -502,7 +514,7 @@ class Oracle:
         """
         if type(smiles_lst) == list:
             score_tuples = self.parallel_oracle(smiles_lst)
-            score_list = (tuple_to_score(score_tuple, *self.max_evaluator, *self.min_evaluator) for score_tuple in score_tuples)
+            score_list = [tuple_to_score(score_tuple, *self.max_evaluator, *self.min_evaluator) for score_tuple in score_tuples]
             print("Current buffer: " + str(self.mol_buffer)) 
             self.sort_buffer()
             self.log_intermediate()
@@ -548,12 +560,7 @@ class Oracle:
             print(nds)
             pareto_front_smiles = []
             num_appended = 0
-            for i in range(len(nds)):
-                # top 1 front only
-                # print(i)
-                # if i > 0:
-                #     break
-                
+            for i in range(len(nds)):            
                 if num_appended >= 120:
                     break
                 print(len(nds[i]))
@@ -666,7 +673,7 @@ class BaseOptimizer:
         if suffix is None:
             output_file_path = os.path.join(self.args.output_dir, 'results.yaml')
         else:
-            output_file_path = os.path.join(self.args.output_dir, 'results_' + suffix + '.yaml')
+            output_file_path = os.path.join(self.args.output_dir, 'seed_' + suffix + '.yaml')
 
         self.sort_buffer()
         new_buffer = {}
@@ -677,7 +684,10 @@ class BaseOptimizer:
                 break
             
         for smiles in self.oracle.mol_buffer:
-            new_buffer[smiles] = [self.oracle.boltz_cache[main_target][smiles], self.oracle.mol_buffer[smiles][1]]
+            mol = Chem.MolFromSmiles(smiles)
+            qed = QED.qed(mol)
+            sa = sascorer.calculateScore(mol)
+            new_buffer[smiles] = [self.oracle.boltz_cache[main_target][smiles], self.oracle.mol_buffer[smiles][1], qed, sa]
         with open(output_file_path, 'w') as f:
             yaml.dump(new_buffer, f, sort_keys=False)
     
@@ -703,10 +713,10 @@ class BaseOptimizer:
         torch.manual_seed(seed)
         random.seed(seed)
         self.seed = seed 
-        self.oracle.task_label = self.args.run_name + "_" + str(seed)
+        self.oracle.task_label = str(seed)
         
         # initial boltz values
-        if self.seed <= 2:
+        if self.seed <= 4:
             for eva in self.args.min_obj:
                 if eva == "c-met" or eva == "brd4":
                     with open(f"/home/ubuntu/MOLLEO/init_caches/{eva}_{str(self.seed)}.yaml", 'r') as file:

@@ -36,9 +36,12 @@ def make_mating_pool(population_smiles: List[Mol], population_scores, pareto_tab
     # scores -> probs
     all_tuples = list(zip(population_scores, population_smiles))
     
+    # prob distribution
     # population_scores = [s + MINIMUM for s in population_scores]
     # sum_scores = sum(population_scores)
     # population_probs = [p / sum_scores for p in population_scores]
+    # print(len(all_tuples))
+    # print(len(population_probs))
     # mating_indices = np.random.choice(len(all_tuples), p=population_probs, size=offspring_size, replace=True)
     
     # rank selection
@@ -122,7 +125,6 @@ class GB_GA_Optimizer(BaseOptimizer):
             pareto_table[smiles] = 0
 
         while True:
-
             if len(self.oracle) > 1:
                 self.sort_buffer()
                 old_score = np.mean([item[1][0] for item in list(self.mol_buffer.items())])
@@ -134,7 +136,7 @@ class GB_GA_Optimizer(BaseOptimizer):
             fp_scores = []
             offspring_mol_temp = []
             if self.args.mol_lm == 'GPT-4' or self.args.mol_lm == "GPT-oss":
-                with ThreadPoolExecutor(max_workers=20) as pool:
+                with ThreadPoolExecutor(max_workers=config["offspring_size"]) as pool:
                     inputs = [(idx, mating_tuples, config["mutation_rate"], self.oracle.min_evaluator, self.oracle.max_evaluator, self.oracle.boltz_cache, self.args.single_parent, self.args.use_tools) for idx in range(config["offspring_size"])]
                     offspring_smiles = list(pool.map(lambda x: self.mol_lm.edit(*x), inputs))
                     
@@ -178,17 +180,21 @@ class GB_GA_Optimizer(BaseOptimizer):
             #Pareto optimal set
             # self.oracle.clean_buffer()
             print("Population size: " + str(len(population_smiles)))
-            pareto_smiles = self.oracle.select_pareto_front(population_smiles)
-            pareto_table = {}
-            for idx, smiles_set in enumerate(pareto_smiles):
-                for smiles in smiles_set:
-                    pareto_table[smiles] = idx
-            population_smiles = list(np.concatenate(pareto_smiles))
-            # stats
-            old_scores = population_scores
-            population_scores = self.oracle(population_smiles)
-            population_tuples = list(zip(population_scores, population_smiles))
-            population_tuples = sorted(population_tuples, key=lambda x: x[0], reverse=True)
+            
+            if not self.args.weighted_obj:
+                pareto_smiles = self.oracle.select_pareto_front(population_smiles)
+                pareto_table = {}
+                for idx, smiles_set in enumerate(pareto_smiles):
+                    for smiles in smiles_set:
+                        pareto_table[smiles] = idx
+                population_smiles = list(np.concatenate(pareto_smiles))
+                population_scores = self.oracle(population_smiles)
+                population_tuples = list(zip(population_scores, population_smiles))
+                population_tuples = sorted(population_tuples, key=lambda x: x[0], reverse=True)
+            else:
+                population_scores = self.oracle(population_smiles)
+                population_tuples = list(zip(population_scores, population_smiles))
+                population_tuples = sorted(population_tuples, key=lambda x: x[0], reverse=True)[:config["population_size"]]
             population_smiles = [t[1] for t in population_tuples]
             population_scores = [t[0] for t in population_tuples]
             print("Population Molecules: " + str(population_smiles))

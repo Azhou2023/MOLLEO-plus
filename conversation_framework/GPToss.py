@@ -1154,7 +1154,7 @@ def run_agent(
     return (state, copy.deepcopy(messages))
 
 def query_LLM(messages, index):
-    print(f"[Index {str(index)}] [Summary Input]: {str(messages)}", flush=True)
+    print(f"[Index {str(index)}] {str(messages)}", flush=True)
 
     response = client.responses.create(
         model='gpt-oss-120b',
@@ -1166,7 +1166,7 @@ def query_LLM(messages, index):
             continue
         else:
             content = msg.content[0].text
-            print(f"[Index {str(index)}] [Summary]: {content}", flush=True)
+            print(f"[Index {str(index)}] {content}", flush=True)
             return content
 
 def calculate_boltz_nautilus(protein_name, ligand_smiles, idx=0):
@@ -1210,19 +1210,69 @@ def calculate_boltz_nautilus(protein_name, ligand_smiles, idx=0):
             time.sleep(3)
             return 0
 
-def calculate_fitness(smiles, affinity):
-    mol = Chem.MolFromSmiles(smiles)
-    qed = QED.qed(mol)
-    sa = 1 - ((sascorer.calculateScore(mol) - 1) / 9)
-    affin = -(affinity / 13)
-    
-    qed = qed * 1
-    sa = sa * 1
-    affin = affin * 5
+def adjust_weights(mols, step, idx, num_history=5, temperature = 1):
+    print(f"[Index {str(idx)}] Adjusting weights...")
+    if step == 0:
+        weights = softmax([1, 1, 1])
+    else:
+        mean_affin = 0
+        mean_qed = 0
+        mean_sa = 0
+        count = 0
+        for smiles in list(mols.keys()):
+            if abs(mols[smiles][1] - step) <= num_history: 
+                try:
+                    mol = Chem.MolFromSmiles(smiles)
+                    qed = QED.qed(mol)
+                    sa = sascorer.calculateScore(mol)
+                    
+                    mean_affin += (-mols[smiles][2]/13)
+                    mean_qed += qed
+                    mean_sa += (1 - ((sa - 1) / 9))
+                    count += 1
+                    print(f"[Index {str(idx)}] {smiles}: {str(mols[smiles][2])} | {str(qed)} | {str(sa)}")
+                except Exception as e:
+                    print(smiles)
+                    print(e, flush=True)
+                    continue
+        mean_affin /= count
+        mean_qed /= count
+        mean_sa /= count
+        print(f"[Index {str(idx)}] mean_affin: {str(mean_affin)}")
+        print(f"[Index {str(idx)}] mean_qed: {str(mean_qed)}")
+        print(f"[Index {str(idx)}] mean_sa: {str(mean_sa)}")
+        weights = softmax([(1 - mean_affin)/temperature, (1 - mean_qed)/temperature, (1 - mean_sa)/temperature])
+    print(f"[Index {str(idx)}] New weights: {str(weights)}")
+    return {"affin": weights[0], "qed": weights[1], "sa": weights[2]}
+
+def calculate_fitness(smiles, affinity, weights):
+    try:
+        if smiles == "":
+            return 0
+        mol = Chem.MolFromSmiles(smiles)
+        qed = QED.qed(mol)
+        sa = 1 - ((sascorer.calculateScore(mol) - 1) / 9)
+        affin = -(affinity / 13)
+        
+        bias = {"qed": 1, "sa": 1, "affin": 5}
+        
+        # hardcode
+        weights = {"qed": 1, "sa": 1, "affin": 1}
+        
+        qed = qed * bias["qed"] * weights["qed"]
+        sa = sa * bias["sa"] * weights["sa"]
+        affin = affin * bias["affin"] * weights["affin"]
+    except Exception as e:
+        print(e)
+        return 0
     
     return affin + qed + sa
 
-def run_trajectory(protein, initial_smiles, initial_affinity, idx=0, num_steps=50):
+def softmax(x):
+    e_x = np.exp(x)
+    return e_x / e_x.sum()
+
+def run_trajectory(protein, initial_smiles, initial_affinity, use_tools=True, idx=0, num_steps=50, temperature=1):
     system_context = (
         "You are a molecular design agent.\n"
         "You may ONLY modify molecules using tools.\n"
@@ -1230,77 +1280,144 @@ def run_trajectory(protein, initial_smiles, initial_affinity, idx=0, num_steps=5
         "Read the parameter descriptions for the tools very carefully.\n"
         "Always ensure that your modifications don't break valence rules and does not result in a fragmented molecule."
     )        
-    mols = {}
-    best_ligand = initial_smiles
-    best_fitness = calculate_fitness(initial_smiles, initial_affinity)
-    best_affinity = initial_affinity
+    mols = {initial_smiles: [idx, -1, initial_affinity]}
+    best_fitness = 0
+    best_ligand = ""
     summary = ""
-    for step in range(num_steps): 
-        print(f"[Index {str(idx)}]: [===== STEP {str(step+1)} =====] {best_ligand}: {str(best_fitness)}")
-        current_mol = Chem.MolFromSmiles(best_ligand)
-        if summary:
-            goal = (
-                f"We will collaborate on modifying a ligand to maximize binding affinity, maximize QED, and minimize SA to the protein {protein}. I will give you the output from docking software after each of your attempts\n."
-                f"Here is our current accumulated knowledge about the target:\n{summary}\n\n"
-                f"First, understand our current accumulated knowledge about the target. Then modify the current ligand (provided below). Assume that there are always more improvements to be made to the current ligand. Do not let molecular weight exceed 700.\n"
-                f"Current ligand: {best_ligand}\n"
-                f"Binding affinity (kcal/mol): {str(best_affinity)}\n"
-                f"QED: {str(round(QED.qed(current_mol), 2))}\n"
-                f"SA: {str(round(sascorer.calculateScore(current_mol), 2))}\n"
-        )
-        else:
-            goal = (
-                f"We will collaborate on modifying a ligand to maximize binding affinity, maximize QED, and minimize SA to the protein {protein}. I will give you the output from docking software after each of your attempts. Assume that there are always more improvements to be made to the current ligand. Do not let molecular weight exceed 700.\n"
-                f"Current ligand: {best_ligand}\n"
-                f"Binding affinity (kcal/mol): {str(best_affinity)}\n"
-                f"QED: {str(round(QED.qed(current_mol), 2))}\n"
-                f"SA: {str(round(sascorer.calculateScore(current_mol), 2))}\n"
-            )
-        conversation_messages = [{"role": "system", "content": system_context}, {"role": "user", "content": goal}]
-        conversation_messages.append({"role": "user", "content":f"Possible attachment points for ligand: {str(get_attachment_points(best_ligand))}"})
-        
-        # print(f"[Index {str(idx)}]: [===== STEP {str(step+1)} =====]\n{conversation_messages}")
-        message_input = copy.deepcopy(conversation_messages)
-        
-        for i in range(10):
-            try:
-                # state = run_agent(parent_smiles[0], task_objective, max_steps=20, index=idx)
-                (state, message_output) = run_agent(best_ligand, message_input, index=idx)
-                current_smiles = state.current_smiles
-                
-                affinity = calculate_boltz_nautilus(protein, current_smiles, idx)
+    try:
+        for step in range(num_steps): 
+            if step % 5 == 0:
+                best_fitness = 0
+                weights = adjust_weights(mols, step, idx, num_history=5, temperature=temperature)
+                for mol in list(mols.keys()):
+                    fitness = calculate_fitness(mol, mols[mol][2], weights)
+                    print(f"[Index {str(idx)}] {mol}: {str(fitness)}")
+                    if fitness > best_fitness:
+                        best_fitness = fitness
+                        best_ligand = mol
+                print(f"[Index {str(idx)}] New best ligand: {best_ligand} | {str(best_fitness)}")
+            print(f"[Index {str(idx)}]: [===== STEP {str(step+1)} =====] {best_ligand}: {str(best_fitness)}")
+            current_mol = Chem.MolFromSmiles(best_ligand)
+            if use_tools:
+                if summary:
+                    goal = (
+                        f"We will collaborate on modifying a ligand to maximize binding affinity, maximize QED, and minimize SA to the protein {protein}. I will give you the output from docking software after each of your attempts\n."
+                        f"Here is our current accumulated knowledge about the target:\n{summary} [END OF SUMMARY] \n\n"
+                        f"First, understand our current accumulated knowledge about the target. Then modify the current ligand (provided below). Assume that there are always more improvements to be made to the current ligand. Do not let molecular weight exceed 700.\n"
+                        f"Current ligand: {best_ligand}\n"
+                        f"Binding affinity (kcal/mol): {str(mols[best_ligand][2])}\n"
+                        f"QED: {str(round(QED.qed(current_mol), 2))}\n"
+                        f"SA: {str(round(sascorer.calculateScore(current_mol), 2))}\n"
+                        )
+                else:
+                    goal = (
+                        f"We will collaborate on modifying a ligand to maximize binding affinity, maximize QED, and minimize SA to the protein {protein}. I will give you the output from docking software after each of your attempts. Assume that there are always more improvements to be made to the current ligand. Do not let molecular weight exceed 700.\n"
+                        f"Current ligand: {best_ligand}\n"
+                        f"Binding affinity (kcal/mol): {str(mols[best_ligand][2])}\n"
+                        f"QED: {str(round(QED.qed(current_mol), 2))}\n"
+                        f"SA: {str(round(sascorer.calculateScore(current_mol), 2))}\n"
+                    )
+            else:
+                if summary:
+                    goal = (
+                            f"We will collaborate on modifying a ligand to maximize binding affinity, maximize QED, and minimize SA to the protein {protein}. I will give you the output from docking software after each of your attempts\n."
+                            f"Here is our current accumulated knowledge about the target:\n{summary} [END OF SUMMARY] \n\n"
+                            f"First, understand our current accumulated knowledge about the target. Then modify the current ligand (provided below). Assume that there are always more improvements to be made to the current ligand.\n"
+                            f"Current ligand: {best_ligand}\n"
+                            f"Binding affinity (kcal/mol): {str(mols[best_ligand][2])}\n"
+                            f"QED: {str(round(QED.qed(current_mol), 2))}\n"
+                            f"SA: {str(round(sascorer.calculateScore(current_mol), 2))}\n"
+                            "\n\nYour output should follow the format: {<<<Explaination>>>: $EXPLANATION, <<<Molecule>>>: \\box{$Molecule}}. Here are the requirements:\n\n\n1. $EXPLANATION should be your analysis.\n2. The $Molecule should be the smiles of your proposed molecule.\n3. The molecule should be valid."
+                    )
+                else:
+                    goal = (
+                            f"We will collaborate on modifying a ligand to maximize binding affinity, maximize QED, and minimize SA to the protein {protein}. I will give you the output from docking software after each of your attempts\n. Assume that there are always more improvements to be made to the current ligand.\n"
+                            f"Current ligand: {best_ligand}\n"
+                            f"Binding affinity (kcal/mol): {str(mols[best_ligand][2])}\n"
+                            f"QED: {str(round(QED.qed(current_mol), 2))}\n"
+                            f"SA: {str(round(sascorer.calculateScore(current_mol), 2))}\n"
+                            "\n\nYour output should follow the format: {<<<Explaination>>>: $EXPLANATION, <<<Molecule>>>: \\box{$Molecule}}. Here are the requirements:\n\n\n1. $EXPLANATION should be your analysis.\n2. The $Molecule should be the smiles of your proposed molecule.\n3. The molecule should be valid."
+                    )
+                    
+            if use_tools:
+                conversation_messages = [{"role": "system", "content": system_context}, {"role": "user", "content": goal}]
+                conversation_messages.append({"role": "user", "content":f"Possible attachment points for ligand: {str(get_attachment_points(best_ligand))}"})
+            else:
+                conversation_messages = [{"role": "user", "content": goal}]
+            
+            # print(f"[Index {str(idx)}]: [===== STEP {str(step+1)} =====]\n{conversation_messages}")
+            message_input = copy.deepcopy(conversation_messages)
+            
+            for i in range(10):
+                try:
+                    # state = run_agent(parent_smiles[0], task_objective, max_steps=20, index=idx)
+                    if use_tools:
+                        (state, message_output) = run_agent(best_ligand, message_input, index=idx)
+                        current_smiles = state.current_smiles
+                        affinity = calculate_boltz_nautilus(protein, current_smiles, idx)
+                    else:
+                        try:
+                            response = query_LLM(message_input, idx)
+                            message_output = message_input
+                            message_output.append({"role": "assistant", "content": response})
+                            proposed_smiles = re.search(r'\\box\{(.*?)\}', response).group(1)
+                            proposed_smiles = proposed_smiles.replace('"', '')
+                            mol = Chem.MolFromSmiles(proposed_smiles)
+                            current_smiles = Chem.MolToSmiles(mol)
+                            print(f"[Index {str(idx)}] LLM-GENERATED: {proposed_smiles}", flush=True)
+                            affinity = calculate_boltz_nautilus(protein, current_smiles, idx)
+                        except:
+                            print(f"[Index {str(idx)}] LLM GENERATION FAILED")
+                            current_smiles = ""
+                            affinity = 0
 
-                mols[current_smiles] = [idx, step, affinity]
-                
-                current_fitness = calculate_fitness(current_smiles, affinity)
-                if current_fitness > best_fitness:
-                    best_ligand = current_smiles
-                    best_fitness = current_fitness
-                    best_affinity - affinity
-               
-                current_mol = Chem.MolFromSmiles(current_smiles)
-                summary_prompt = f"The new ligand {current_smiles} has a binding affinity of {str(affinity)}. It has a QED of {str(QED.qed(current_mol))} and a SA of {str(sascorer.calculateScore(current_mol))}.\n"
-                summary_prompt += "Based on the results of this past trial, update our current accumulated knowledge of the important details and information about the binding target. Describe what has been effective and what has not. Keep your summary brief."
-                message_output.append({"role": "user", "content": summary_prompt})
-                summary = query_LLM(message_output, idx)
-                break
-            except Exception as e:
-                print(e)
-                continue
-    print(f"Trajectory {str(idx)} produced: {str(mols)}")
-    return mols
+                    mols[current_smiles] = [idx, step, affinity]
+                    
+                    current_fitness = calculate_fitness(current_smiles, affinity, weights)
+                    if current_fitness > best_fitness:
+                        best_ligand = current_smiles
+                        best_fitness = current_fitness
+                                    
+                    if current_smiles:
+                        current_mol = Chem.MolFromSmiles(current_smiles)
+                        qed = QED.qed(current_mol)
+                        sa = sascorer.calculateScore(current_mol)
+                        summary_prompt = f"The new ligand {current_smiles} has a binding affinity of {str(affinity)}. It has a QED of {str(qed)} and a SA of {str(sa)}.\n"
+                    else:
+                        summary_prompt = f"The new ligand {current_smiles} is either syntactically invalid or completely failed to bind to the site.\n"
+                    summary_prompt += "Based on the results of this past trial, update our current accumulated knowledge of the important details and information about the binding target. Describe what has been effective and what has not. Keep your summary brief."
+                    message_output.append({"role": "user", "content": summary_prompt})
+                    print(f"[Index {str(idx)}] GENERATING SUMMARY:", flush=True)
+                    summary = query_LLM(message_output, idx)
+                    break
+                except Exception as e:
+                    print(e)
+                    continue
+    except Exception as e:
+        print(e)
+    finally:
+        print(f"Trajectory {str(idx)} produced: {str(mols)}")
+        return mols
 
 if __name__ == "__main__":
+    run_name = sys.argv[1]
+    temperature = sys.argv[2]
+    print(run_name)
+    print(f"Temperature: {temperature}")
+    
+    before = time.time()
     with open(f"/home/ubuntu/MOLLEO/init_caches/c-met_0.yaml", 'r') as file:
         initial_pool = yaml.safe_load(file)
     with ThreadPoolExecutor(max_workers=20) as pool:
-        inputs = [("c-met", list(initial_pool.keys())[idx], initial_pool[list(initial_pool.keys())[idx]], idx, 50) for idx in range(20)]
+        inputs = [("c-met", list(initial_pool.keys())[idx], initial_pool[list(initial_pool.keys())[idx]], False, idx, 50, float(temperature)) for idx in range(20)]
         output_smiles = list(pool.map(lambda x: run_trajectory(*x), inputs))
     print(f"Output molecule pool: {str(output_smiles)}")
     result = {k: v for d in output_smiles for k, v in d.items()}
-    with open(f"/home/ubuntu/MOLLEO/conversation_framework/results/weighted_objective.yaml", 'w') as f:
+    with open(f"/home/ubuntu/MOLLEO/conversation_framework/results/{run_name}.yaml", 'w') as f:
             yaml.dump(result, f, sort_keys=False)
-    
+    after = time.time()
+    print(f"Took {str((after-before)/3600)} hours")
+
     # run_trajectory("c-met", "C[NH+](Cc1cccs1)C[C@H](O)COc1c(Cl)cccc1Cl", -9.02)
     # state = run_agent(
     #     initial_smiles=["Cc1ccc(-c2cc(N)c(=O)n([C@H](C)C(=O)NC3CCCCC3)n2)o1", "COc1cc(F)c(NC(C)=O)c(NC(=O)c2cc(F)ccc2O)c1"],

@@ -1,1 +1,4 @@
 .env
+conversation_framework/logs
+multi_objective/logs
+single_objective/logs

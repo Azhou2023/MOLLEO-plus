@@ -17,6 +17,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 
+import networkx as nx
 from rdkit.Chem import QED
 from rdkit.Chem import RDConfig
 from rdkit.Chem import AllChem
@@ -30,6 +31,10 @@ client = OpenAI(base_url="https://gpt-oss-120b-svarambally.nrp-nautilus.io/v1", 
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, rdMolDescriptors
+
+from rdkit.Chem import GetPeriodicTable
+
+pt = GetPeriodicTable()
 
 
 ALKYL_FRAGMENTS = {
@@ -150,21 +155,38 @@ def validate_smiles(smiles: str) -> dict:
         return {"is_valid": False, "error": str(e)}
 
 
-def get_attachment_points(smiles: str) -> dict:
-    """Identifies atoms with available hydrogens for substitution."""
+def compute_atom_centralities(mol) -> dict:
+    n = mol.GetNumAtoms()
+
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for bond in mol.GetBonds():
+        G.add_edge(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+
+    betweenness = nx.betweenness_centrality(G, normalized=True)
+
+    return betweenness
+
+def get_ligand_structure(smiles: str) -> dict:
     try:
         mol = mol_from_smiles(smiles)
+        centralities = compute_atom_centralities(mol)
         pts = []
 
         for atom in mol.GetAtoms():
-            h_count = atom.GetTotalNumHs()
-            if h_count > 0:
-                pts.append({
-                    "atom_index": atom.GetIdx(),
-                    "element": atom.GetSymbol(),
-                    "substitutable_hydrogens": h_count,
-                })
-        return {"attachment_points": pts}
+            idx = atom.GetIdx()
+            neighbors = atom.GetNeighbors()
+            pts.append({
+                "atom_index": idx,
+                "element": atom.GetSymbol(),
+                "substitutable_hydrogens": atom.GetTotalNumHs(),
+                "available_valences": pt.GetDefaultValence(atom.GetAtomicNum()) - atom.GetTotalValence(),
+                "num_neighbors": atom.GetDegree(),
+                "neighbor_indices": [n.GetIdx() for n in neighbors],
+                "is_in_ring": atom.IsInRing(),
+                "centrality": round(float(centralities[idx]), 2),
+            })
+        return {"structure_information": pts}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -436,7 +458,8 @@ def replace_substructure(
     smiles: str,
     query_smarts: str,
     replacement_smiles: str,
-    replace_all: bool = False
+    anchor_atom_idx: int,
+    replace_all: bool = False,
 ) -> dict:
     try:
         mol = mol_from_smiles(smiles)
@@ -483,9 +506,26 @@ def replace_substructure(
         if not matches:
             return {"success": False, "error": "No matching substructure found in the molecule."}
 
+        if anchor_atom_idx is not None:
+            if anchor_atom_idx < 0 or anchor_atom_idx >= mol.GetNumAtoms():
+                return {
+                    "success": False,
+                    "error": f"anchor_atom_idx {anchor_atom_idx} is out of range for a molecule with {mol.GetNumAtoms()} atoms.",
+                }
+            filtered = [m for m in matches if anchor_atom_idx in m]
+            if not filtered:
+                return {
+                    "success": False,
+                    "error": (
+                        f"anchor_atom_idx {anchor_atom_idx} is not part of any substructure match. "
+                        f"Found {len(matches)} match(es) not containing this atom."
+                    ),
+                }
+            matches = filtered
+
         result_mol = mol
-        replacements_done = 0
         match_set = set(matches[0])
+
         
         # Find all scaffold atoms neighbouring the match (the cut bonds)
         scaffold_attach_indices = []
@@ -524,7 +564,6 @@ def replace_substructure(
             rw.RemoveAtom(idx)
 
         result_mol = rw.GetMol()
-        replacements_done += 1
 
         # ── Connectivity check ────────────────────────────────────────────
         frags = Chem.GetMolFrags(result_mol, asMols=True)
@@ -559,7 +598,8 @@ def replace_substructure(
 
 def remove_substructure(
     smiles: str,
-    substructure_smarts: str
+    substructure_smarts: str,
+    anchor_atom_idx: int
 ) -> dict:
     """
     Removes all instances of a substructure match from the molecule.
@@ -579,7 +619,24 @@ def remove_substructure(
         
         if not matches:
             return {"success": False, "error": "Substructure not found in molecule"}
-
+        
+        if anchor_atom_idx is not None:
+            if anchor_atom_idx < 0 or anchor_atom_idx >= mol.GetNumAtoms():
+                return {
+                    "success": False,
+                    "error": f"anchor_atom_idx {anchor_atom_idx} is out of range for a molecule with {mol.GetNumAtoms()} atoms.",
+                }
+            filtered = [m for m in matches if anchor_atom_idx in m]
+            if not filtered:
+                return {
+                    "success": False,
+                    "error": (
+                        f"anchor_atom_idx {anchor_atom_idx} is not part of any substructure match. "
+                        f"Found {len(matches)} match(es) not containing this atom."
+                    ),
+                }
+            matches = filtered
+            
         indices_to_remove = set()
         for match in matches:
             indices_to_remove.update(match)
@@ -831,7 +888,7 @@ TOOL_SCHEMAS = [
        {
     "type": "function",
     "name": "crossover_molecules",
-    "description": "Splits two molecules at the specified indices and recombines the resulting fragments. Try to split each molecule roughly in half.",
+    "description": "Splits two molecules at the specified indices and recombines the resulting fragments. Do NOT split molecules at a ring index. Try to split each molecule roughly in half, use high centrality as measure for good splitting index.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -917,6 +974,7 @@ TOOL_SCHEMAS = [
                         "indole_3", "indole_N", "benzimidazole", "quinoline",
                         "isoquinoline", "benzodioxole", "benzofuran",
                         "adamantyl", "norbornyl", "biphenyl"
+                        
                     ],
                 },
                 "bond_type": {"type": "string", "enum": ["SINGLE", "DOUBLE", "TRIPLE"]},
@@ -950,7 +1008,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "name": "replace_substructure",
-        "description": "Replace terminal SMARTS-specified substructure with custom SMILES; only replaces first SMARTS match",
+        "description": "Replace terminal SMARTS-specified substructure with custom SMILES; only replaces first SMARTS match. Try to target terminal substructures.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -963,21 +1021,29 @@ TOOL_SCHEMAS = [
                     "type": "string",
                     "description": "MUST contain exactly one labeled attachment point '[*:1]'"
                 },
+                "anchor_atom_idx":{
+                    "type": "integer",
+                    "description": "Index of any atom within your desired substructure to replace. Eliminates ambiguity when matching your SMARTS."
+                }
             },
-            "required": ["smiles", "query_smarts", "replacement_smiles"],
+            "required": ["smiles", "query_smarts", "replacement_smiles", "anchor_atom_idx"],
         },
     },
     {
         "type": "function",
         "name": "remove_substructure",
-        "description": "Delete SMARTS-specified substructure",
+        "description": "Delete SMARTS-specified substructure. Try to target terminal substructures.",
         "parameters": {
             "type": "object",
             "properties": {
                 "smiles": {"type": "string"},
                 "substructure_smarts": {"type": "string"},
+                "anchor_atom_idx":{
+                    "type": "integer",
+                    "description": "Index of any atom within your desired substructure to remove. Eliminates ambiguity when matching your SMARTS."
+                }
             },
-            "required": ["smiles", "substructure_smarts"],
+            "required": ["smiles", "substructure_smarts", "anchor_atom_idx"],
         },
     },
 ]
@@ -1040,13 +1106,13 @@ def run_agent(
     # crossovers (2 molecules)
     user_goal = (
         f"Goal: {prompt}\n"
-        f"Initial SMILES:\n1. {initial_smiles[0]}\n2. {initial_smiles[1]}"
+        # f"Initial SMILES:\n1. {initial_smiles[0]}\n2. {initial_smiles[1]}"
     )    
 
     messages = [
         {"role": "system", "content": system_context},
         {"role": "user", "content": user_goal},
-        {"role": "user", "content": f"Possible attachment points for ligand 1: {str(get_attachment_points(initial_smiles[0]))}\nPossible attachment points for ligand 2: {str(get_attachment_points(initial_smiles[1]))}"},
+        {"role": "user", "content": f"Ligand structure and possible attachment points for ligand 1: {str(get_ligand_structure(initial_smiles[0]))}\nLigand structure and possible attachment points for ligand 2: {str(get_ligand_structure(initial_smiles[1]))}"},
         {"role": "user", "content": f"Molecule properties for ligand 1: {str(calculate_properties(initial_smiles[0]))}\nMolecule properties for ligand 2: {str(calculate_properties(initial_smiles[1]))}"}
     ]
     
@@ -1054,7 +1120,7 @@ def run_agent(
 
     should_break = False
     for step in range(max_steps):
-        print(f"\n[Index {str(index)}] CURRENT MESSAGES: {str(messages)}\n", flush=True)
+        # print(f"\n[Index {str(index)}] CURRENT MESSAGES: {str(messages)}\n", flush=True)
         response = client.responses.create(
             model='gpt-oss-120b',
             input=messages,
@@ -1063,7 +1129,7 @@ def run_agent(
         
         for msg in response.output:
             if msg.type == "reasoning":
-                print(f"[Index {str(index)}] [Reasoning]: {msg.content}") 
+                print(f"\n[Index {str(index)}] [Reasoning]: {msg.content}") 
             elif msg.type == "function_call":
                 print(f"[Index {str(index)}] [Tool Call]: {msg}")
                 
@@ -1095,17 +1161,17 @@ def run_agent(
                 })
                 if state.current_smiles:
                     if tool_name in modification_tools:
-                        # for i, item in enumerate(messages):
-                        #     if isinstance(item, dict) and "content" in item and "Possible attachment points" in item["content"]:
-                        #         messages.pop(i)
-                        #         break
+                        for i, item in enumerate(messages):
+                            if isinstance(item, dict) and "content" in item and "possible attachment points" in item["content"]:
+                                messages.pop(i)
+                                break
                         
                         messages.append({
                             "role": "user",
                             "content": (
                                 "Output FINAL_ANSWER if you have made sufficient modifications (make at most 3). Ensure that desired properties are maintained.\n"
                                 f"Current SMILES: {state.current_smiles}\n"
-                                f"Possible attachment points: {str(get_attachment_points(state.current_smiles))}"
+                                f"Ligand structure and possible attachment points: {str(get_ligand_structure(state.current_smiles))}"
                             )
                         })
                         messages.append({
@@ -1140,7 +1206,8 @@ def query_LLM(messages, index):
 class GPToss:
     def __init__(self):
         self.task2description = {
-                'cmet': 'I have two molecules and their docking scores to c-MET. The docking score measures how well a molecule binds to c-MET. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
+                'c-met': 'I have two molecules and their docking scores to c-MET. The docking score measures how well a molecule binds to c-MET. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
+                'brd4': 'I have two molecules and their docking scores to BRD4. The docking score measures how well a molecule binds to BRD4. A lower docking score generally indicates a stronger or more favorable binding affinity.\n\n',
                 'qed': 'I have two molecules and their QED scores. The QED score measures the drug-likeness of the molecule.\n\n',
                 'jnk3': 'I have two molecules and their JNK3 scores. The JNK3 score measures a molecular\'s biological activity against JNK3.\n\n',
                 'drd2': 'I have two molecules and their DRD2 scores. The DRD2 score measures a molecule\'s biological activity against a biological target named the dopamine type 2 receptor (DRD2).\n\n',
@@ -1153,7 +1220,8 @@ class GPToss:
                 'mestranol_similarity': 'I have two molecules and their mestranol similarity scores. The mestranol similarity score measures a molecule\'s Tanimoto similarity with Mestranol.\n\n',
                 }
         self.task2objective = {
-                'cmet': 'Please propose a new molecule that binds better to c-MET. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
+                'c-met': 'Please propose a new molecule that binds better to c-MET. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
+                'brd4': 'Please propose a new molecule that binds better to BRD4. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
                 'qed': 'Please propose a new molecule that has a higher QED score. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
                 'jnk3': 'Please propose a new molecule that has a higher JNK3 score. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
                 'drd2': 'Please propose a new molecule that has a higher DRD2 score. You can either make crossover and mutations based on the given molecules or just propose a new molecule based on your knowledge.\n\n',
@@ -1190,7 +1258,7 @@ class GPToss:
         parent.append(random.choice(mating_tuples))
         parent_smiles = [t[1] for t in parent]
         parent_scores = [t[0] for t in parent]
-        print(parent_smiles)
+        # print(parent_smiles)
         try: 
             task_objective = "\nI want to "
             for min_obj in min_evaluators:
@@ -1218,6 +1286,22 @@ class GPToss:
 
                 #crossovers (2 input molecules)
                 objective=f"{task_objective} I have given you two candidate ligands. Please propose a new molecule that binds better to c-MET. You are encouraged to make a crossover between the molecules on the first step, then mutate the resulting molecule. Only make a few modifications (at most 3), then respond with FINAL_ANSWER. Do not let molecular weight exceed 700.\n"
+                mol_tuple = ''
+                for i in range(len(parent)):
+                    smiles = parent_smiles[i]
+                    tu = f'\n{str(i+1)}. {smiles}\n'
+                    for obj in all_objectives: 
+                        tu += obj_map[obj[0]]
+                        tu+= ": "
+                        if obj[0] == "c-met" or obj[0] == "brd4":
+                            score = round(boltz_cache[obj[0]][smiles], 2)
+                        else:    
+                            mol = Chem.MolFromSmiles(smiles)
+                            score = round(obj[1](mol), 2)
+                        tu += str(score)
+                        tu += "\n"
+                    mol_tuple = mol_tuple + tu
+                objective += mol_tuple
                 for i in range(10):
                     try:
                         # state = run_agent(parent_smiles[0], task_objective, max_steps=20, index=idx)
@@ -1233,23 +1317,51 @@ class GPToss:
                         print(e)
                         continue
             else:
-            #original prompt
+                #original prompt
                 mol_tuple = ''
-                for i in range(len(parent)):
-                    smiles = parent_smiles[i]
-                    tu = f'\n{str(i+1)}. {smiles}\n'
-                    for obj in all_objectives: 
-                        tu += obj_map[obj[0]]
-                        tu+= ": "
-                        if obj[0] == "c-met" or obj[0] == "brd4":
-                            score = boltz_cache[obj[0]][smiles]
-                        else:    
-                            mol = Chem.MolFromSmiles(smiles)
-                            score = obj[1](mol)
-                        tu += str(score)
-                        tu += "\n"
+                for i in range(2):
+                    tu = '\n[' + parent_smiles[i] + ',' + str(parent_scores[i]) + ']'
                     mol_tuple = mol_tuple + tu
-                prompt = task_definition + mol_tuple + task_objective + self.requirements
+                protein = ""
+                task_objective = "\nI want to "
+                for min_obj in min_evaluators:
+                    if min_obj[0] == "c-met" or min_obj[0] == "brd4":
+                        task_objective += "improve "
+                        protein = min_obj[0]
+                    else:
+                        task_objective += "minimize "
+                    task_objective += obj_map[min_obj[0]]
+                    task_objective += ", "
+                for max_obj in max_evaluators[:-1]:
+                    if max_obj[0] == "c-met" or max_obj[0] == "brd4":
+                        task_objective += "worsen "
+                    else:
+                        task_objective += "maximize "
+                    task_objective += obj_map[max_obj[0]]
+                    task_objective += ", "
+                task_objective += "and maximize " if max_evaluators[-1][0] != "c-met" and max_evaluators[-1][0] != "brd4" else "and worsen "
+                task_objective += obj_map[max_evaluators[-1][0]]
+                task_objective += ". "
+                task_objective += self.task2objective[protein]
+                prompt = self.task2description[protein] + mol_tuple + task_objective + self.requirements
+            
+                # modified prompt
+                # mol_tuple = ''
+                # for i in range(len(parent)):
+                #     smiles = parent_smiles[i]
+                #     tu = f'\n{str(i+1)}. {smiles}\n'
+                #     for obj in all_objectives: 
+                #         tu += obj_map[obj[0]]
+                #         tu+= ": "
+                #         if obj[0] == "c-met" or obj[0] == "brd4":
+                #             score = round(boltz_cache[obj[0]][smiles], 2)
+                #         else:    
+                #             mol = Chem.MolFromSmiles(smiles)
+                #             score = round(obj[1](mol), 2)
+                #         tu += str(score)
+                #         tu += "\n"
+                #     mol_tuple = mol_tuple + tu
+                # prompt = task_definition + mol_tuple + task_objective + self.requirements
                     
                 print(f"[Index {str(idx)}] Prompt: " + prompt, flush=True)
                 messages = [{"role": "user", "content": prompt}]
@@ -1319,7 +1431,7 @@ def sanitize_smiles(smi):
         return None
     try:
         mol = Chem.MolFromSmiles(smi, sanitize=True)
-        smi_canon = Chem.MolToSmiles(mol, isomericSmiles=False, canonical=True)
+        smi_canon = Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True)
         return smi_canon
     except:
         return None

@@ -279,8 +279,8 @@ def construct_yaml(log_file):
     with open(f"/home/ubuntu/MOLLEO/conversation_framework/results/{log_file}.yaml", 'w') as f:
         yaml.dump(mols, f, sort_keys=False)
     
-# construct_yaml("markov")
-runs = ["markov", "summary", "weighted_objective"]
+# construct_yaml("dynamic_reweighting")
+runs = ["weighted_objective_no_tools", "weighted_objective"]
 fig, axs = plt.subplots(1, 1)
 for run in runs:
     affins = analyze_results(run, eval_sim=False)
@@ -293,3 +293,5 @@ plt.title("Conversation Trajectories")
 plt.ylabel("Boltz-2 Affinity (kcal/mol)")
 plt.xlabel("Steps")
 plt.savefig('/home/ubuntu/MOLLEO/conversation_framework/trajectory.png')
+
+# mol = Chem.MolFromSmiles("CC(=O)Nc1ccc(C(=O)N[C@H](c2ccc(F)cc2)c2nccn2)cc1")

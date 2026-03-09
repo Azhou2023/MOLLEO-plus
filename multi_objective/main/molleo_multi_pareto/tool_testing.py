@@ -1023,7 +1023,7 @@ TOOL_SCHEMAS = [
                 },
                 "anchor_atom_idx":{
                     "type": "integer",
-                    "description": "Index of any atom within your desired substructure to replace. Eliminates ambiguity when matching your SMARTS."
+                    "description": "Index of any atom within your query_smarts substructure. Eliminates ambiguity when matching your SMARTS."
                 }
             },
             "required": ["smiles", "query_smarts", "replacement_smiles", "anchor_atom_idx"],
@@ -1187,7 +1187,7 @@ if __name__ == "__main__":
     # print("Steps taken:", len(state.history))
     
     
-    mol = mol_from_smiles("Cc1cc(F)c(OCC(=O)NC(=O)C2(C)CCN(c3ccncc3F)CC2)c(C)c1F")
+    mol = mol_from_smiles("O=C(O[NH2+]C[C@@H]1CCO[C@H]1c1ccc2ccccc2n1)c1cc([N+](=O)[O-])ccc1N1CCOCC1")
     centralities = compute_atom_centralities(mol)
 
     for atom in mol.GetAtoms():
